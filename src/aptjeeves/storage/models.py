@@ -130,3 +130,17 @@ class FacilityInfoUpsert:
     availability: str | None
     rules_or_steps: list[str]
     caveats: str | None
+
+
+@dataclass(frozen=True)
+class VectorEntryUpsert:
+    """Vector index row for one canonical fact version."""
+
+    fact_id: str
+    fact_type: str
+    fact_version: int
+    embedding_text: str
+    embedding_hash: str
+    embedding_model_version: str
+    embedding_json: str
+    vector_store_ref: str | None

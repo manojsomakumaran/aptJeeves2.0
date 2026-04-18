@@ -280,6 +280,47 @@ facility_info
 fact_evidence
 ```
 
+## Index Facts
+
+After extraction, create or refresh local vector entries:
+
+```powershell
+$env:PYTHONPATH = ".\src"
+python -m aptjeeves.cli index-facts --apartment "Green Acres"
+```
+
+For a manual DB:
+
+```powershell
+python -m aptjeeves.cli --db .\scratch.sqlite3 index-facts
+```
+
+Current indexing uses a deterministic local token-vector model, not real semantic embeddings yet. It stores sanitized retrieval text and a local vector JSON in:
+
+```text
+vector_entries
+```
+
+Example output:
+
+```json
+{
+  "status": "completed",
+  "vectors_upserted": 1,
+  "vector_ids": ["vector_abc123"],
+  "db_path": "data\\apartments\\green-acres\\aptjeeves.sqlite3",
+  "embedding_model": "local_token_vector_v1"
+}
+```
+
+The current local workflow is:
+
+```powershell
+python -m aptjeeves.cli ingest --apartment "Green Acres" --platform whatsapp --file ".\exports\WhatsApp Chat with Apartment Main.txt"
+python -m aptjeeves.cli extract-pending --apartment "Green Acres"
+python -m aptjeeves.cli index-facts --apartment "Green Acres"
+```
+
 ## Run Tests
 
 From the project folder:
@@ -307,6 +348,7 @@ phone/email/URL/flat/address redaction
 sanitized storage for WhatsApp and Telegram
 canonical fact upsert/merge behavior
 fake extraction into service/process/facility facts
+local vector indexing for canonical facts
 apartment DB path resolution
 idempotent repeated imports
 expanded monthly imports that add only new messages
@@ -352,6 +394,7 @@ message normalization
 privacy redaction into sanitized_text
 canonical fact storage
 fake extractor and extraction validation contract
+local vector_entries indexing
 message_fingerprint dedupe
 apartment-specific database selection
 privacy-safe pipeline events
@@ -363,7 +406,7 @@ Not implemented yet:
 
 ```text
 real LLM extraction provider
-vector indexing
+real semantic embedding provider
 retrieval and answer generation
 final privacy guardrails
 resident vs vendor contact privacy classification

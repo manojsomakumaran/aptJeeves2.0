@@ -9,6 +9,7 @@ from pathlib import Path
 from aptjeeves.config import load_settings, resolve_db_path
 from aptjeeves.extraction.fake_extractor import FakeExtractor
 from aptjeeves.extraction.service import ExtractionService
+from aptjeeves.indexing.indexer import VectorIndexingService
 from aptjeeves.ingestion.service import ChatIngestionService, IngestRequest
 from aptjeeves.storage.db import apply_migrations, connect
 from aptjeeves.storage.repositories import ImportRunRepository
@@ -64,6 +65,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apartment chatbot name used to select the database.",
     )
     extract.add_argument("--limit", type=int, default=100)
+
+    index = subparsers.add_parser(
+        "index-facts",
+        help="Create or refresh vector entries for canonical facts.",
+    )
+    index.add_argument(
+        "--apartment",
+        default=None,
+        help="Apartment chatbot name used to select the database.",
+    )
+    index.add_argument("--limit", type=int, default=100)
 
     return parser
 
@@ -152,6 +164,23 @@ def main(argv: list[str] | None = None) -> int:
                     "fact_ids": fact_ids,
                     "db_path": str(db_path),
                     "extractor": "fake",
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "index-facts":
+        service = VectorIndexingService(connection)
+        vector_ids = service.index_pending(limit=args.limit)
+        print(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "vectors_upserted": len(vector_ids),
+                    "vector_ids": vector_ids,
+                    "db_path": str(db_path),
+                    "embedding_model": service.embedding_model.model_version,
                 },
                 indent=2,
             )

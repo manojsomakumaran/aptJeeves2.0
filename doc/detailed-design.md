@@ -1282,6 +1282,27 @@ refresh vectors after fact changes
 add indexing tests
 ```
 
+Implementation status:
+
+```text
+implemented vector_entries table
+implemented local deterministic token-vector embedding model
+implemented sanitized embedding text builders for service_contact, process_info, facility_info
+implemented VectorIndexingService
+implemented index-facts CLI command
+refreshes vector_entries when canonical fact_version changes
+stores embedding_text, embedding_hash, embedding_json, model version, and vector_store_ref
+```
+
+Still future work:
+
+```text
+real semantic embedding provider
+vector similarity retrieval
+hybrid metadata reranking
+embedding backend swap for LanceDB/Chroma/FAISS/SQLite vector extension
+```
+
 ### Milestone 5: Retrieval And Answering
 
 ```text

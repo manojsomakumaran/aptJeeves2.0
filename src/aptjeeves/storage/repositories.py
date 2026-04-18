@@ -13,6 +13,7 @@ from aptjeeves.storage.models import (
     ProcessInfoUpsert,
     RawMessageInsert,
     ServiceContactUpsert,
+    VectorEntryUpsert,
 )
 
 
@@ -363,6 +364,25 @@ class CanonicalFactRepository:
             "SELECT * FROM canonical_facts ORDER BY created_at, fact_id"
         ).fetchall()
 
+    def list_facts_for_indexing(self, *, limit: int = 100) -> list[sqlite3.Row]:
+        """Return facts whose current version has no active vector entry."""
+
+        return self.connection.execute(
+            """
+            SELECT cf.*
+            FROM canonical_facts cf
+            LEFT JOIN vector_entries ve
+              ON ve.fact_id = cf.fact_id
+             AND ve.fact_version = cf.fact_version
+             AND ve.status = 'active'
+            WHERE cf.merge_status = 'active'
+              AND ve.vector_id IS NULL
+            ORDER BY cf.updated_at, cf.fact_id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
     def list_evidence(self, fact_id: str) -> list[sqlite3.Row]:
         """Return all evidence rows for one fact."""
 
@@ -486,3 +506,105 @@ def _json(value: object) -> str:
     """Serialize structured details in a deterministic JSON representation."""
 
     return json.dumps(value, sort_keys=True)
+
+
+class VectorEntryRepository:
+    """Persistence operations for the local vector index table."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        """Create a repository bound to a SQLite connection."""
+
+        self.connection = connection
+
+    def upsert_active(self, entry: VectorEntryUpsert) -> str:
+        """Create or refresh the active vector entry for one fact."""
+
+        existing = self.get_active_by_fact_id(entry.fact_id)
+        now = utc_now_iso()
+        if existing is None:
+            vector_id = f"vector_{uuid.uuid4().hex}"
+            self.connection.execute(
+                """
+                INSERT INTO vector_entries (
+                  vector_id, fact_id, fact_type, fact_version, embedding_text,
+                  embedding_hash, embedding_model_version, embedding_json,
+                  vector_store_ref, created_at, updated_at, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                """,
+                (
+                    vector_id,
+                    entry.fact_id,
+                    entry.fact_type,
+                    entry.fact_version,
+                    entry.embedding_text,
+                    entry.embedding_hash,
+                    entry.embedding_model_version,
+                    entry.embedding_json,
+                    entry.vector_store_ref,
+                    now,
+                    now,
+                ),
+            )
+            return vector_id
+
+        vector_id = existing["vector_id"]
+        self.connection.execute(
+            """
+            UPDATE vector_entries
+            SET fact_type = ?,
+                fact_version = ?,
+                embedding_text = ?,
+                embedding_hash = ?,
+                embedding_model_version = ?,
+                embedding_json = ?,
+                vector_store_ref = ?,
+                updated_at = ?,
+                status = 'active'
+            WHERE vector_id = ?
+            """,
+            (
+                entry.fact_type,
+                entry.fact_version,
+                entry.embedding_text,
+                entry.embedding_hash,
+                entry.embedding_model_version,
+                entry.embedding_json,
+                entry.vector_store_ref,
+                now,
+                vector_id,
+            ),
+        )
+        return str(vector_id)
+
+    def get_active_by_fact_id(self, fact_id: str) -> sqlite3.Row | None:
+        """Return the active vector entry for a fact, if one exists."""
+
+        return self.connection.execute(
+            """
+            SELECT *
+            FROM vector_entries
+            WHERE fact_id = ? AND status = 'active'
+            """,
+            (fact_id,),
+        ).fetchone()
+
+    def count_active(self) -> int:
+        """Return the number of active vector entries."""
+
+        row = self.connection.execute(
+            "SELECT COUNT(*) AS count FROM vector_entries WHERE status = 'active'"
+        ).fetchone()
+        return int(row["count"])
+
+    def list_active(self) -> list[sqlite3.Row]:
+        """Return active vector entries in stable order."""
+
+        return self.connection.execute(
+            """
+            SELECT *
+            FROM vector_entries
+            WHERE status = 'active'
+            ORDER BY updated_at, vector_id
+            """
+        ).fetchall()
