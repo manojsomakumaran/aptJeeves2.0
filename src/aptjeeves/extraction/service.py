@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections import defaultdict
 from typing import Any
 
 from aptjeeves.extraction.schemas import ExtractedFact, Extractor, MessageForExtraction
@@ -9,12 +10,13 @@ from aptjeeves.extraction.validator import validate_extraction_payload
 from aptjeeves.ingestion.hashing import sha256_text
 from aptjeeves.observability.events import ObservabilityService
 from aptjeeves.storage.models import (
+    ExtractionSummary,
     FacilityInfoUpsert,
     FactEvidenceInput,
     ProcessInfoUpsert,
     ServiceContactUpsert,
 )
-from aptjeeves.storage.repositories import CanonicalFactRepository, RawMessageRepository
+from aptjeeves.storage.repositories import CanonicalFactRepository, ImportRunRepository, RawMessageRepository
 
 
 class ExtractionService:
@@ -25,21 +27,47 @@ class ExtractionService:
 
         self.connection = connection
         self.extractor = extractor
+        self.import_runs = ImportRunRepository(connection)
         self.raw_messages = RawMessageRepository(connection)
         self.facts = CanonicalFactRepository(connection)
         self.events = ObservabilityService(connection)
 
-    def extract_rows(self, rows: list[sqlite3.Row]) -> list[str]:
-        """Extract facts from raw message rows and return upserted fact IDs."""
+    def extract_rows(self, rows: list[sqlite3.Row]) -> ExtractionSummary:
+        """Extract facts from raw message rows and return an ExtractionSummary.
+
+        If the extractor or validator raises, all messages in the batch are
+        counted as extraction failures and the error is surfaced as a pipeline
+        event rather than crashing the caller.
+        """
 
         if not rows:
-            return []
+            return ExtractionSummary(fact_ids=[], extraction_failures=0)
 
         trace_id = f"trace_{uuid.uuid4().hex}"
         messages = [_message_for_extraction(row) for row in rows]
         allowed_ids = {message.message_id for message in messages}
-        payload = self.extractor.extract(messages)
-        result = validate_extraction_payload(payload, allowed_message_ids=allowed_ids)
+
+        try:
+            payload = self.extractor.extract(messages)
+            result = validate_extraction_payload(payload, allowed_message_ids=allowed_ids)
+        except Exception as exc:
+            self.events.emit(
+                trace_id=trace_id,
+                event_type="extraction_batch_failed",
+                stage="extraction",
+                severity="error",
+                payload={
+                    "message_count": len(rows),
+                    "error": str(exc),
+                    "extractor_prompt_version": self.extractor.prompt_version,
+                    "llm_model_version": self.extractor.model_version,
+                },
+            )
+            with self.connection:
+                for row in rows:
+                    self.raw_messages.mark_processing_status(row["message_id"], "failed")
+            return ExtractionSummary(fact_ids=[], extraction_failures=len(rows))
+
         rows_by_id = {row["message_id"]: row for row in rows}
         fact_ids: list[str] = []
         referenced_message_ids: set[str] = set()
@@ -71,12 +99,37 @@ class ExtractionService:
                 )
                 self.raw_messages.mark_processing_status(row["message_id"], status)
 
-        return fact_ids
+        return ExtractionSummary(fact_ids=fact_ids, extraction_failures=0)
 
-    def extract_pending(self, *, limit: int = 100) -> list[str]:
-        """Extract facts from raw messages still marked as `new`."""
+    def extract_pending(self, *, limit: int = 100) -> ExtractionSummary:
+        """Extract facts from raw messages still marked as `new`.
 
-        return self.extract_rows(self.raw_messages.list_by_processing_status("new", limit=limit))
+        Messages are grouped by import_batch_id so extraction failures can be
+        attributed back to the correct import run record.
+        """
+
+        all_rows = self.raw_messages.list_by_processing_status("new", limit=limit)
+        if not all_rows:
+            return ExtractionSummary(fact_ids=[], extraction_failures=0)
+
+        by_batch: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        for row in all_rows:
+            by_batch[row["import_batch_id"]].append(row)
+
+        all_fact_ids: list[str] = []
+        total_failures = 0
+
+        for batch_id, batch_rows in by_batch.items():
+            summary = self.extract_rows(batch_rows)
+            all_fact_ids.extend(summary.fact_ids)
+            if summary.extraction_failures > 0:
+                with self.connection:
+                    self.import_runs.increment_extraction_failures(
+                        batch_id, summary.extraction_failures
+                    )
+            total_failures += summary.extraction_failures
+
+        return ExtractionSummary(fact_ids=all_fact_ids, extraction_failures=total_failures)
 
     def _upsert_fact(
         self,

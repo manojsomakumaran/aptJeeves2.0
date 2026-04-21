@@ -35,6 +35,7 @@ class IngestRequest:
     chat_name: str | None = None
     default_timezone: str = "Asia/Kolkata"
     date_order: str = "DMY"
+    max_parse_failure_rate: float = 0.05
 
 
 class ChatIngestionService:
@@ -223,7 +224,11 @@ class ChatIngestionService:
                         },
                     )
 
-            status = "completed_with_errors" if parse_result.failures else "completed"
+            status = _import_status(
+                parse_failures=len(parse_result.failures),
+                total_attempted=total_messages_seen + len(parse_result.failures),
+                max_failure_rate=request.max_parse_failure_rate,
+            )
             # Final counters live on import_runs so the CLI can show a concise
             # summary without scanning all events.
             self.import_runs.complete(
@@ -283,3 +288,26 @@ def _fallback_chat_name_from_file(file_path: Path) -> str:
     if not stem:
         raise ValueError(f"Could not infer chat name from file path: {file_path}")
     return stem
+
+
+def _import_status(
+    *,
+    parse_failures: int,
+    total_attempted: int,
+    max_failure_rate: float,
+) -> str:
+    """Determine import run status from parse failure counts and threshold.
+
+    - ``completed`` when there are no parse failures.
+    - ``completed_with_errors`` when the failure rate is at or below the
+      configured threshold (minor/expected failures such as file headers).
+    - ``failed`` when the failure rate exceeds the threshold, indicating the
+      parser or export format has a significant problem.
+    """
+
+    if parse_failures == 0:
+        return "completed"
+    failure_rate = parse_failures / max(1, total_attempted)
+    if failure_rate > max_failure_rate:
+        return "failed"
+    return "completed_with_errors"

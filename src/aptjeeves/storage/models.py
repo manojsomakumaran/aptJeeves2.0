@@ -144,3 +144,11 @@ class VectorEntryUpsert:
     embedding_model_version: str
     embedding_json: str
     vector_store_ref: str | None
+
+
+@dataclass(frozen=True)
+class ExtractionSummary:
+    """Result returned by ExtractionService after processing a batch of messages."""
+
+    fact_ids: list[str]
+    extraction_failures: int

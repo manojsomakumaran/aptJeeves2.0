@@ -23,15 +23,16 @@ def test_fake_extraction_upserts_service_contact_from_sanitized_message(tmp_path
         IngestRequest(platform="whatsapp", file_path=export_path, chat_name="Main")
     )
 
-    fact_ids = ExtractionService(connection, FakeExtractor()).extract_pending()
+    result = ExtractionService(connection, FakeExtractor()).extract_pending()
 
-    assert len(fact_ids) == 1
+    assert len(result.fact_ids) == 1
+    assert result.extraction_failures == 0
     fact_repo = CanonicalFactRepository(connection)
-    fact = fact_repo.get_fact(fact_ids[0])
+    fact = fact_repo.get_fact(result.fact_ids[0])
     assert fact["fact_type"] == "service_contact"
     assert fact["source_count"] == 1
     assert fact["privacy_status"] == "needs_review"
-    evidence = fact_repo.list_evidence(fact_ids[0])
+    evidence = fact_repo.list_evidence(result.fact_ids[0])
     assert len(evidence) == 1
     assert "9876543210" not in evidence[0]["sanitized_snippet"]
     assert "PHONE_1" in evidence[0]["sanitized_snippet"]
@@ -57,9 +58,9 @@ def test_fake_extraction_merges_same_service_contact_across_messages(tmp_path: P
         IngestRequest(platform="whatsapp", file_path=export_path, chat_name="Main")
     )
 
-    fact_ids = ExtractionService(connection, FakeExtractor()).extract_pending()
+    result = ExtractionService(connection, FakeExtractor()).extract_pending()
 
-    assert len(fact_ids) == 2
+    assert len(result.fact_ids) == 2
     facts = CanonicalFactRepository(connection).list_facts()
     assert len(facts) == 1
     assert facts[0]["source_count"] == 2
@@ -82,9 +83,9 @@ def test_fake_extraction_handles_process_and_facility_facts(tmp_path: Path) -> N
         IngestRequest(platform="whatsapp", file_path=export_path, chat_name="Main")
     )
 
-    fact_ids = ExtractionService(connection, FakeExtractor()).extract_pending()
+    result = ExtractionService(connection, FakeExtractor()).extract_pending()
 
-    assert len(fact_ids) == 2
+    assert len(result.fact_ids) == 2
     fact_types = {row["fact_type"] for row in CanonicalFactRepository(connection).list_facts()}
     assert fact_types == {"process_info", "facility_info"}
 
@@ -98,9 +99,10 @@ def test_fake_extraction_marks_no_extractable_info(tmp_path: Path) -> None:
         IngestRequest(platform="whatsapp", file_path=export_path, chat_name="Main")
     )
 
-    fact_ids = ExtractionService(connection, FakeExtractor()).extract_pending()
+    result = ExtractionService(connection, FakeExtractor()).extract_pending()
 
-    assert fact_ids == []
+    assert result.fact_ids == []
+    assert result.extraction_failures == 0
     assert RawMessageRepository(connection).list_all()[0]["processing_status"] == "no_extractable_info"
 
 
@@ -133,4 +135,48 @@ def test_cli_extract_pending_uses_fake_extractor(tmp_path: Path, capsys) -> None
     assert extract_exit == 0
     assert output["status"] == "completed"
     assert output["facts_upserted"] == 1
+    assert output["extraction_failures"] == 0
     assert output["extractor"] == "fake"
+
+
+def test_extraction_failures_tracked_and_written_to_import_runs(tmp_path: Path) -> None:
+    """Extraction failures must be counted and persisted on the import_runs row."""
+
+    connection = connect(tmp_path / "aptjeeves.sqlite3")
+    apply_migrations(connection)
+    export_path = tmp_path / "chat.txt"
+    export_path.write_text(
+        "16/04/26, 9:30 PM - Alice: Call plumber 9876543210 for sink repair.",
+        encoding="utf-8",
+    )
+    ingest_summary = ChatIngestionService(connection).ingest(
+        IngestRequest(platform="whatsapp", file_path=export_path, chat_name="Main")
+    )
+    import_batch_id = ingest_summary.import_batch_id
+
+    class BrokenExtractor:
+        prompt_version = "broken_v1"
+        model_version = "broken_model_v1"
+
+        def extract(self, messages):
+            raise RuntimeError("Simulated LLM failure")
+
+    result = ExtractionService(connection, BrokenExtractor()).extract_pending()
+
+    assert result.extraction_failures == 1
+    assert result.fact_ids == []
+
+    row = connection.execute(
+        "SELECT extraction_failures FROM import_runs WHERE import_batch_id = ?",
+        (import_batch_id,),
+    ).fetchone()
+    assert row["extraction_failures"] == 1
+
+    msg_row = RawMessageRepository(connection).list_all()[0]
+    assert msg_row["processing_status"] == "failed"
+
+    event = connection.execute(
+        "SELECT * FROM pipeline_events WHERE event_type = 'extraction_batch_failed'"
+    ).fetchone()
+    assert event is not None
+    assert event["stage"] == "extraction"

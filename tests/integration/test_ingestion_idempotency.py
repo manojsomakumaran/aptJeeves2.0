@@ -298,9 +298,11 @@ def test_whatsapp_ingestion_stores_sanitized_text(tmp_path: Path) -> None:
     assert "9876543210" not in row["sanitized_text"]
     assert "B-1204" not in row["sanitized_text"]
     assert "ramesh@example.com" not in row["sanitized_text"]
+    assert "Ramesh" not in row["sanitized_text"]
     assert "PHONE_1" in row["sanitized_text"]
     assert "FLAT_1" in row["sanitized_text"]
     assert "EMAIL_1" in row["sanitized_text"]
+    assert "CONTACT_1" in row["sanitized_text"]
 
     redaction_event = connection.execute(
         """
@@ -310,7 +312,7 @@ def test_whatsapp_ingestion_stores_sanitized_text(tmp_path: Path) -> None:
         """
     ).fetchone()
     payload = json.loads(redaction_event["sanitized_payload_json"])
-    assert payload["redaction_counts"] == {"EMAIL": 1, "FLAT": 1, "PHONE": 1}
+    assert payload["redaction_counts"] == {"CONTACT": 1, "EMAIL": 1, "FLAT": 1, "PHONE": 1}
 
 
 def test_telegram_ingestion_stores_sanitized_text(tmp_path: Path) -> None:
@@ -342,6 +344,80 @@ def test_telegram_ingestion_stores_sanitized_text(tmp_path: Path) -> None:
     assert "URL_1" in sanitized
     assert "PHONE_1" in sanitized
     assert "FLAT_1" in sanitized
+
+
+def test_parse_failure_threshold_completed_with_errors_below_threshold(tmp_path: Path) -> None:
+    """A failure rate below the threshold should produce completed_with_errors, not failed."""
+
+    db_path = tmp_path / "aptjeeves.sqlite3"
+    export_path = tmp_path / "chat.txt"
+    # 1 garbage line + 10 valid messages → 1/11 ≈ 9% failure rate
+    lines = ["GARBAGE LINE NOT A MESSAGE"]
+    for i in range(10):
+        lines.append(f"16/04/26, {i + 1}:30 AM - Alice: Message number {i}.")
+    export_path.write_text("\n".join(lines), encoding="utf-8")
+
+    connection = connect(db_path)
+    apply_migrations(connection)
+    # Default threshold is 5%; 9% exceeds it — use a 20% threshold for this test.
+    summary = ChatIngestionService(connection).ingest(
+        IngestRequest(
+            platform="whatsapp",
+            file_path=export_path,
+            chat_name="Main",
+            max_parse_failure_rate=0.20,
+        )
+    )
+
+    assert summary.status == "completed_with_errors"
+    assert summary.parse_failures == 1
+    assert summary.total_messages_seen == 10
+
+
+def test_parse_failure_threshold_failed_when_rate_exceeded(tmp_path: Path) -> None:
+    """A failure rate above the threshold should produce failed status."""
+
+    db_path = tmp_path / "aptjeeves.sqlite3"
+    export_path = tmp_path / "chat.txt"
+    # 5 garbage lines + 5 valid messages → 5/10 = 50% failure rate
+    lines = [f"GARBAGE LINE {i}" for i in range(5)]
+    for i in range(5):
+        lines.append(f"16/04/26, {i + 1}:30 AM - Alice: Message number {i}.")
+    export_path.write_text("\n".join(lines), encoding="utf-8")
+
+    connection = connect(db_path)
+    apply_migrations(connection)
+    summary = ChatIngestionService(connection).ingest(
+        IngestRequest(
+            platform="whatsapp",
+            file_path=export_path,
+            chat_name="Main",
+            max_parse_failure_rate=0.05,
+        )
+    )
+
+    assert summary.status == "failed"
+    assert summary.parse_failures == 5
+
+
+def test_parse_failure_threshold_completed_when_no_failures(tmp_path: Path) -> None:
+    """A clean export with zero failures should produce completed status."""
+
+    db_path = tmp_path / "aptjeeves.sqlite3"
+    export_path = tmp_path / "chat.txt"
+    export_path.write_text(
+        "16/04/26, 9:30 PM - Alice: Hello everyone.",
+        encoding="utf-8",
+    )
+
+    connection = connect(db_path)
+    apply_migrations(connection)
+    summary = ChatIngestionService(connection).ingest(
+        IngestRequest(platform="whatsapp", file_path=export_path, chat_name="Main")
+    )
+
+    assert summary.status == "completed"
+    assert summary.parse_failures == 0
 
 
 def _event_counts(connection: sqlite3.Connection) -> dict[str, int]:

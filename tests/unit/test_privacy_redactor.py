@@ -18,7 +18,7 @@ def test_redact_text_replaces_common_pii_with_placeholders() -> None:
     assert "EMAIL_1" in result.text
     assert "FLAT_1" in result.text
     assert "URL_1" in result.text
-    assert result.counts == {"PHONE": 1, "EMAIL": 1, "URL": 1, "FLAT": 1}
+    assert result.counts == {"PHONE": 1, "EMAIL": 1, "URL": 1, "FLAT": 1, "CONTACT": 1}
 
 
 def test_redact_text_numbers_placeholders_per_type() -> None:
@@ -42,3 +42,44 @@ def test_address_detector_finds_tower_and_block_markers() -> None:
     spans = detect_sensitive_spans("Meet near Tower 2 or Block A.")
 
     assert [span.kind for span in spans] == ["ADDRESS", "ADDRESS"]
+
+
+def test_contact_detector_replaces_capitalized_name_after_trigger() -> None:
+    result = redact_text("Contact Ramesh for plumbing work.")
+
+    assert "Ramesh" not in result.text
+    assert "CONTACT_1" in result.text
+    assert result.counts.get("CONTACT") == 1
+
+
+def test_contact_detector_replaces_multiple_names() -> None:
+    result = redact_text("Call Suresh or message Priya for help.")
+
+    assert "Suresh" not in result.text
+    assert "Priya" not in result.text
+    assert "CONTACT_1" in result.text
+    assert "CONTACT_2" in result.text
+    assert result.counts.get("CONTACT") == 2
+
+
+def test_contact_detector_ignores_lowercase_words_after_trigger() -> None:
+    result = redact_text("Call for help or message the team.")
+
+    assert result.counts.get("CONTACT", 0) == 0
+
+
+def test_contact_detector_ignores_stopwords() -> None:
+    result = redact_text("Contact us for more info. Call them now.")
+
+    assert result.counts.get("CONTACT", 0) == 0
+
+
+def test_contact_detector_does_not_redact_trigger_word_itself() -> None:
+    result = redact_text("Contact Ramesh at 9876543210.")
+
+    # The name "Ramesh" is replaced; the trigger word "Contact" is preserved.
+    assert "Ramesh" not in result.text
+    assert "CONTACT_1" in result.text
+    assert "PHONE_1" in result.text
+    # The trigger word should remain in the text, not be replaced.
+    assert "Contact" in result.text

@@ -70,6 +70,7 @@ class ImportRunRepository:
         new_messages_inserted: int,
         duplicate_messages_skipped: int,
         parse_failures: int,
+        extraction_failures: int = 0,
         notes: str | None = None,
     ) -> None:
         """Mark an import as finished and store final counters."""
@@ -83,6 +84,7 @@ class ImportRunRepository:
                 new_messages_inserted = ?,
                 duplicate_messages_skipped = ?,
                 parse_failures = ?,
+                extraction_failures = ?,
                 notes = ?
             WHERE import_batch_id = ?
             """,
@@ -93,9 +95,22 @@ class ImportRunRepository:
                 new_messages_inserted,
                 duplicate_messages_skipped,
                 parse_failures,
+                extraction_failures,
                 notes,
                 import_batch_id,
             ),
+        )
+
+    def increment_extraction_failures(self, import_batch_id: str, count: int) -> None:
+        """Add to the extraction_failures counter for an existing import run."""
+
+        self.connection.execute(
+            """
+            UPDATE import_runs
+            SET extraction_failures = extraction_failures + ?
+            WHERE import_batch_id = ?
+            """,
+            (count, import_batch_id),
         )
 
     def get_summary(self, import_batch_id: str) -> ImportSummary | None:

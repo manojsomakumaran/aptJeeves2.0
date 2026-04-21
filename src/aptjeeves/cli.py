@@ -155,13 +155,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "extract-pending":
         service = ExtractionService(connection, FakeExtractor())
-        fact_ids = service.extract_pending(limit=args.limit)
+        summary = service.extract_pending(limit=args.limit)
         print(
             json.dumps(
                 {
                     "status": "completed",
-                    "facts_upserted": len(fact_ids),
-                    "fact_ids": fact_ids,
+                    "facts_upserted": len(summary.fact_ids),
+                    "extraction_failures": summary.extraction_failures,
+                    "fact_ids": summary.fact_ids,
                     "db_path": str(db_path),
                     "extractor": "fake",
                 },
