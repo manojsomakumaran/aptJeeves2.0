@@ -17,9 +17,9 @@ def test_vector_indexing_creates_sanitized_vector_entry(tmp_path: Path) -> None:
     apply_migrations(connection)
     _ingest_and_extract_plumber(connection, tmp_path)
 
-    vector_ids = VectorIndexingService(connection).index_pending()
+    summary = VectorIndexingService(connection).index_pending()
 
-    assert len(vector_ids) == 1
+    assert len(summary.vector_ids) == 1
     vectors = VectorEntryRepository(connection).list_active()
     assert len(vectors) == 1
     assert vectors[0]["status"] == "active"
@@ -38,8 +38,8 @@ def test_vector_indexing_is_idempotent_when_fact_version_is_current(tmp_path: Pa
     first = service.index_pending()
     second = service.index_pending()
 
-    assert len(first) == 1
-    assert second == []
+    assert len(first.vector_ids) == 1
+    assert second.vector_ids == []
     assert VectorEntryRepository(connection).count_active() == 1
 
 
@@ -48,7 +48,7 @@ def test_vector_indexing_refreshes_when_fact_version_changes(tmp_path: Path) -> 
     apply_migrations(connection)
     _ingest_and_extract_plumber(connection, tmp_path)
     service = VectorIndexingService(connection)
-    first_vector_id = service.index_pending()[0]
+    first_vector_id = service.index_pending().vector_ids[0]
     fact = CanonicalFactRepository(connection).list_facts()[0]
 
     connection.execute(
@@ -61,13 +61,15 @@ def test_vector_indexing_refreshes_when_fact_version_changes(tmp_path: Path) -> 
     )
     refreshed = service.index_pending()
 
-    assert refreshed == [first_vector_id]
-    vector = VectorEntryRepository(connection).get_active_by_fact_id(fact["fact_id"])
+    assert refreshed.vector_ids == [first_vector_id]
+    vector = VectorEntryRepository(connection).get_active_by_fact_and_model(fact["fact_id"], service.embedding_model.model_version)
     assert vector["fact_version"] == fact["fact_version"] + 1
     assert "strongly recommended" in vector["embedding_text"]
 
 
-def test_cli_index_facts_uses_local_embedding_model(tmp_path: Path, capsys) -> None:
+def test_cli_index_facts_uses_local_embedding_model(tmp_path: Path, capsys, monkeypatch) -> None:
+    # Force local model by overriding APTJEEVES_EMBEDDING_MODEL to "local"
+    monkeypatch.setenv("APTJEEVES_EMBEDDING_MODEL", "local")
     db_path = tmp_path / "aptjeeves.sqlite3"
     export_path = tmp_path / "chat.txt"
     export_path.write_text(

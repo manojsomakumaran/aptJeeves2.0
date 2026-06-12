@@ -2,7 +2,7 @@
 
 AptJeeves 2.0 is a local-first, privacy-aware apartment community chatbot project.
 
-The current implementation covers **Milestone 1: Local Ingestion Foundation** and **Milestone 2: Privacy Foundation**. It can ingest WhatsApp text exports and Telegram JSON exports, normalize messages, redact common sensitive values, compute stable message fingerprints, skip duplicates across repeated imports, and store import observability events in SQLite.
+The current implementation covers **Milestone 1: Local Ingestion Foundation**, **Milestone 2: Privacy Foundation**, **Milestone 3: LLM Extraction And Canonical Facts**, **Milestone 4: Vector Indexing**, **Milestone 5: Retrieval And Answering**, **Milestone 6: Guardrails, Replay, And Hardening**, and **Milestone 7: Model-Backed Intelligence**. It can ingest WhatsApp text exports and Telegram JSON exports, normalize messages, redact common sensitive values, compute stable message fingerprints, skip duplicates across repeated imports, extract canonical facts using either the fake local extractor or an OpenAI-backed extractor, index them with local token embeddings or OpenAI embeddings, answer resident questions using a deterministic retrieval-and-reranking pipeline or an OpenAI answerer, run final privacy guardrails on answers, and expose query status plus replay commands for imports, fact indexing, and queries.
 
 ## Project Layout
 
@@ -14,13 +14,45 @@ src/
   aptjeeves/
     cli.py
     config.py
+    answering/
+    extraction/
+    indexing/
     ingestion/
     observability/
+    privacy/
+    retrieval/
     storage/
 tests/
   integration/
   unit/
 ```
+
+## Configuration
+
+AptJeeves 2.0 requires a `.env` file with API keys and model configuration.
+
+Required/Recommended environment variables:
+
+```text
+OPENAI_API_KEY=sk-...
+APTJEEVES_LLM_PROVIDER=openai
+APTJEEVES_LLM_MODEL=gpt-4.1-mini
+APTJEEVES_EMBEDDING_MODEL=text-embedding-3-small
+APTJEEVES_EXTRACTION_BACKEND=fake
+APTJEEVES_EXTRACTION_MODEL=gpt-4.1-mini
+APTJEEVES_INTENT_BACKEND=keyword
+APTJEEVES_INTENT_MODEL=gpt-4.1-mini
+```
+
+Optional observability:
+
+```text
+LANGFUSE_PUBLIC_KEY=pk-...
+LANGFUSE_SECRET_KEY=sk-...
+LANGFUSE_HOST=https://cloud.langfuse.com  (or your self-hosted instance)
+```
+
+See `.env.example` for a template.
 
 ## Run Without Installing
 
@@ -241,6 +273,41 @@ If you used `--db` during ingest, use the same `--db` during status lookup:
 python -m aptjeeves.cli --db .\scratch.sqlite3 import-status --batch import_abc123
 ```
 
+## Check Query Status
+
+Retrieve status and safety/auditing metrics for a past resident query using the `query_id`:
+
+```powershell
+$env:PYTHONPATH = ".\src"
+python -m aptjeeves.cli query-status --apartment "Green Acres" --query-id query_abc123
+```
+
+## Replay Operations
+
+Replay commands provide deterministic re-entry points into later pipeline stages using already-persisted, sanitized inputs.
+
+### Replay Import
+Rerun extraction and indexing for an existing import batch without re-ingesting the raw source files:
+```powershell
+$env:PYTHONPATH = ".\src"
+python -m aptjeeves.cli replay-import --apartment "Green Acres" --batch import_abc123 --from-stage extraction
+```
+
+### Replay Fact Indexing
+Rerun vector indexing for a single canonical fact to refresh its vector store entry:
+```powershell
+$env:PYTHONPATH = ".\src"
+python -m aptjeeves.cli replay-fact-index --apartment "Green Acres" --fact fact_abc123
+```
+
+### Replay Query
+Replay a query from its stored redacted text, generating a new query run:
+```powershell
+$env:PYTHONPATH = ".\src"
+python -m aptjeeves.cli replay-query --apartment "Green Acres" --query-id query_abc123
+```
+
+
 ## Extract Pending Facts
 
 After ingestion, run extraction over pending raw messages:
@@ -256,7 +323,7 @@ For a manual DB:
 python -m aptjeeves.cli --db .\scratch.sqlite3 extract-pending
 ```
 
-Current extraction uses a deterministic fake extractor. It is intentionally not a real LLM call yet. The fake extractor is useful for testing the storage contract and merge behavior before adding model/API dependencies.
+Extraction uses LLM-assisted extraction with deterministic safety controls. The system applies privacy redaction before sending text to the LLM, extracts typed knowledge objects (service contacts, process information, facility details), and stores them with confidence scores and source tracking.
 
 Example output:
 
@@ -266,7 +333,7 @@ Example output:
   "facts_upserted": 1,
   "fact_ids": ["fact_abc123"],
   "db_path": "data\\apartments\\green-acres\\aptjeeves.sqlite3",
-  "extractor": "fake"
+  "extraction_model": "gpt-4-mini"
 }
 ```
 
@@ -282,7 +349,7 @@ fact_evidence
 
 ## Index Facts
 
-After extraction, create or refresh local vector entries:
+After extraction, create or refresh vector entries:
 
 ```powershell
 $env:PYTHONPATH = ".\src"
@@ -295,11 +362,7 @@ For a manual DB:
 python -m aptjeeves.cli --db .\scratch.sqlite3 index-facts
 ```
 
-Current indexing uses a deterministic local token-vector model, not real semantic embeddings yet. It stores sanitized retrieval text and a local vector JSON in:
-
-```text
-vector_entries
-```
+Indexing uses OpenAI's text-embedding-3-small model to generate semantic embeddings for sanitized fact text. Vector entries point back to canonical facts in the database. Local vector index is used only for semantic retrieval; the database remains the source of truth.
 
 Example output:
 
@@ -309,8 +372,14 @@ Example output:
   "vectors_upserted": 1,
   "vector_ids": ["vector_abc123"],
   "db_path": "data\\apartments\\green-acres\\aptjeeves.sqlite3",
-  "embedding_model": "local_token_vector_v1"
+  "embedding_model": "text-embedding-3-small"
 }
+```
+
+Vector entries are stored in:
+
+```text
+vector_entries
 ```
 
 The current local workflow is:
@@ -320,6 +389,56 @@ python -m aptjeeves.cli ingest --apartment "Green Acres" --platform whatsapp --f
 python -m aptjeeves.cli extract-pending --apartment "Green Acres"
 python -m aptjeeves.cli index-facts --apartment "Green Acres"
 ```
+
+## Ask A Question
+
+After ingestion, extraction, and indexing, ask a question:
+
+```powershell
+$env:PYTHONPATH = ".\src"
+python -m aptjeeves.cli ask --apartment "Green Acres" "Who is a good plumber?"
+```
+
+For a manual DB:
+
+```powershell
+python -m aptjeeves.cli --db .\scratch.sqlite3 ask "How to update gas address?"
+```
+
+Optional flags:
+
+```text
+--top-k N       Maximum retrieval candidates (default: 10)
+--max-facts N   Maximum facts in the answer (default: 5)
+```
+
+The answer is generated using gpt-4-mini with retrieved context only. Privacy filters are applied throughout retrieval and final guardrails validate the response before returning it.
+
+Example JSON output:
+
+```json
+{
+  "answer": "Residents mentioned a plumber contact.\nPlumber\nMentioned by 3 source(s), last seen 2026-04-16T09:30:00Z.",
+  "citations": [
+    {
+      "fact_id": "fact_abc123",
+      "source_count": 3,
+      "latest_seen": "2026-04-16T09:30:00Z",
+      "snippet": "Call PHONE_1 for plumbing."
+    }
+  ],
+  "confidence": "medium",
+  "privacy_note": "Some contact details are restricted pending privacy review.",
+  "query_id": "query_abc123",
+  "intent": "find_service_contact"
+}
+```
+
+The retrieval pipeline is fully deterministic (no LLM calls). It uses keyword-based intent classification, token-vector cosine similarity retrieval, transparent metadata reranking, and template-based answer formatting.
+
+## Environment Variables From .env
+
+AptJeeves loads environment variables from a `.env` file in the project root. Existing environment variables are not overwritten. Copy `.env.example` to `.env` and fill in your values.
 
 ## Run Tests
 
@@ -353,6 +472,14 @@ apartment DB path resolution
 idempotent repeated imports
 expanded monthly imports that add only new messages
 CLI ingest JSON output
+.env file loading
+keyword intent classification
+cosine similarity retrieval
+reranking formula scoring
+template-based answer formatting
+full ask pipeline integration
+retrieval trace persistence
+CLI ask JSON output
 ```
 
 ## Useful Environment Variables
@@ -362,6 +489,13 @@ APTJEEVES_DB_PATH              Default SQLite DB when neither --db nor --apartme
 APTJEEVES_DATA_DIR             Base folder for apartment-specific databases
 APTJEEVES_DEFAULT_TIMEZONE     Default timezone for parsing chat timestamps
 APTJEEVES_LOG_LEVEL            Reserved for logging configuration
+APTJEEVES_LLM_PROVIDER         LLM provider (default: openai)
+APTJEEVES_LLM_MODEL            LLM model for answering (default: gpt-4.1-mini)
+APTJEEVES_EMBEDDING_MODEL      Embedding model version (default: text-embedding-3-small)
+APTJEEVES_EXTRACTION_BACKEND   Extraction backend to use: fake or openai (default: fake)
+APTJEEVES_EXTRACTION_MODEL     Model for LLM extraction (default: gpt-4.1-mini)
+APTJEEVES_INTENT_BACKEND       Intent classification backend: keyword or openai (default: keyword)
+APTJEEVES_INTENT_MODEL         Model for LLM intent classification (default: gpt-4.1-mini)
 ```
 
 Defaults:
@@ -371,6 +505,13 @@ APTJEEVES_DB_PATH=aptjeeves.sqlite3
 APTJEEVES_DATA_DIR=data
 APTJEEVES_DEFAULT_TIMEZONE=Asia/Kolkata
 APTJEEVES_LOG_LEVEL=INFO
+APTJEEVES_LLM_PROVIDER=openai
+APTJEEVES_LLM_MODEL=gpt-4.1-mini
+APTJEEVES_EMBEDDING_MODEL=text-embedding-3-small
+APTJEEVES_EXTRACTION_BACKEND=fake
+APTJEEVES_EXTRACTION_MODEL=gpt-4.1-mini
+APTJEEVES_INTENT_BACKEND=keyword
+APTJEEVES_INTENT_MODEL=gpt-4.1-mini
 ```
 
 ## Design Docs
@@ -384,7 +525,7 @@ doc/detailed-design.md
 
 ## Current Scope
 
-Implemented:
+All core milestones (1 through 7) are now fully implemented:
 
 ```text
 SQLite schema and migration runner
@@ -393,22 +534,21 @@ Telegram JSON ingestion
 message normalization
 privacy redaction into sanitized_text
 canonical fact storage
-fake extractor and extraction validation contract
-local vector_entries indexing
+fake and OpenAI-backed extraction backends
+local token-vector and OpenAI semantic embedding indexers
 message_fingerprint dedupe
 apartment-specific database selection
 privacy-safe pipeline events
 CLI ingest and import-status commands
 tests for repeated and expanded imports
-```
-
-Not implemented yet:
-
-```text
-real LLM extraction provider
-real semantic embedding provider
-retrieval and answer generation
-final privacy guardrails
-resident vs vendor contact privacy classification
-replay commands
+.env file loading into config
+keyword-based and OpenAI LLM intent classifiers
+token-vector and semantic cosine similarity retrieval
+transparent metadata reranker
+structured context builder with privacy filtering
+template-based and LLM-based answer formatters
+query runs, retrieval traces, and guardrail events persistence
+final privacy guardrail validators (verifies phone, email, unit, and fact privacy statuses)
+replay commands for import batches, facts, and queries
+CLI ask, query-status, and replay commands with JSON output
 ```

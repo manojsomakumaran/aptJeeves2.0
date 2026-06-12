@@ -106,7 +106,8 @@ def test_fake_extraction_marks_no_extractable_info(tmp_path: Path) -> None:
     assert RawMessageRepository(connection).list_all()[0]["processing_status"] == "no_extractable_info"
 
 
-def test_cli_extract_pending_uses_fake_extractor(tmp_path: Path, capsys) -> None:
+def test_cli_extract_pending_uses_fake_extractor(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("APTJEEVES_EXTRACTION_BACKEND", "fake")
     db_path = tmp_path / "aptjeeves.sqlite3"
     export_path = tmp_path / "chat.txt"
     export_path.write_text(

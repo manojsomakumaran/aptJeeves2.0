@@ -48,6 +48,21 @@ class ImportSummary:
 
 
 @dataclass(frozen=True)
+class QuerySummary:
+    """Compact query status returned by the service and CLI."""
+
+    query_id: str
+    status: str
+    query_text_redacted: str
+    query_intent: str | None
+    final_action: str | None
+    retrieval_trace_id: str | None
+    guardrail_events_count: int
+    created_at: str
+    completed_at: str | None
+
+
+@dataclass(frozen=True)
 class FactEvidenceInput:
     """Evidence linking a canonical fact to one source message."""
 
@@ -152,3 +167,18 @@ class ExtractionSummary:
 
     fact_ids: list[str]
     extraction_failures: int
+    total_pending_before: int = 0
+    remaining_pending: int = 0
+    estimated_batches_remaining: int = 0
+    limit_applied: int = 0
+
+
+@dataclass(frozen=True)
+class IndexSummary:
+    """Result returned by VectorIndexingService after processing a batch of facts."""
+
+    vector_ids: list[str]
+    total_pending_before: int = 0
+    remaining_pending: int = 0
+    estimated_batches_remaining: int = 0
+    limit_applied: int = 0

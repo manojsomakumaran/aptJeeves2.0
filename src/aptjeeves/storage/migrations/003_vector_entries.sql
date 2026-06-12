@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS vector_entries (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vector_entries_fact_id_active
-  ON vector_entries(fact_id)
+  ON vector_entries(fact_id, embedding_model_version)
   WHERE status = 'active';
 
 CREATE INDEX IF NOT EXISTS idx_vector_entries_fact_id

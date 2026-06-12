@@ -19,6 +19,8 @@ env/
 *.db
 data/
 exports/
+.env
+*.log
 
 # Build outputs
 build/

@@ -1,6 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sqlite3
+import logging
+import math
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -17,6 +19,16 @@ from aptjeeves.storage.models import (
     ServiceContactUpsert,
 )
 from aptjeeves.storage.repositories import CanonicalFactRepository, ImportRunRepository, RawMessageRepository
+
+
+_root_logger = logging.getLogger("aptjeeves")
+if not _root_logger.handlers:
+    _fh = logging.FileHandler("aptjeeves_debug.log")
+    _fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    _root_logger.addHandler(_fh)
+    _root_logger.setLevel(logging.DEBUG)
+
+logger = logging.getLogger(__name__)
 
 
 class ExtractionService:
@@ -43,14 +55,21 @@ class ExtractionService:
         if not rows:
             return ExtractionSummary(fact_ids=[], extraction_failures=0)
 
+        logger.info(f"Extracting facts for a batch of {len(rows)} messages")
         trace_id = f"trace_{uuid.uuid4().hex}"
         messages = [_message_for_extraction(row) for row in rows]
         allowed_ids = {message.message_id for message in messages}
 
         try:
-            payload = self.extractor.extract(messages)
+            import inspect
+            sig = inspect.signature(self.extractor.extract)
+            if "trace_id" in sig.parameters:
+                payload = self.extractor.extract(messages, trace_id=trace_id)
+            else:
+                payload = self.extractor.extract(messages)
             result = validate_extraction_payload(payload, allowed_message_ids=allowed_ids)
         except Exception as exc:
+            logger.error(f"Extraction batch failed: {exc}", exc_info=True)
             self.events.emit(
                 trace_id=trace_id,
                 event_type="extraction_batch_failed",
@@ -77,6 +96,7 @@ class ExtractionService:
                 evidence = _evidence_for_fact(extracted, rows_by_id)
                 referenced_message_ids.update(item.message_id for item in evidence)
                 fact_id = self._upsert_fact(extracted, evidence, rows_by_id)
+                logger.debug(f"Upserted canonical fact {fact_id} of type {extracted.fact_type}")
                 fact_ids.append(fact_id)
                 self.events.emit(
                     trace_id=trace_id,
@@ -108,9 +128,22 @@ class ExtractionService:
         attributed back to the correct import run record.
         """
 
+        total_pending = self.raw_messages.count_by_processing_status("new")
         all_rows = self.raw_messages.list_by_processing_status("new", limit=limit)
+        processed_count = len(all_rows)
+        remaining_pending = max(0, total_pending - processed_count)
+        estimated_batches_remaining = math.ceil(remaining_pending / limit) if limit > 0 else 0
+
+        logger.info(f"Extracting pending messages with limit {limit}. Found {processed_count} new messages out of {total_pending} total pending.")
         if not all_rows:
-            return ExtractionSummary(fact_ids=[], extraction_failures=0)
+            return ExtractionSummary(
+                fact_ids=[],
+                extraction_failures=0,
+                total_pending_before=total_pending,
+                remaining_pending=remaining_pending,
+                estimated_batches_remaining=estimated_batches_remaining,
+                limit_applied=limit,
+            )
 
         by_batch: dict[str, list[sqlite3.Row]] = defaultdict(list)
         for row in all_rows:
@@ -120,16 +153,26 @@ class ExtractionService:
         total_failures = 0
 
         for batch_id, batch_rows in by_batch.items():
-            summary = self.extract_rows(batch_rows)
-            all_fact_ids.extend(summary.fact_ids)
-            if summary.extraction_failures > 0:
+            batch_failures = 0
+            for chunk_rows in _chunk_rows(batch_rows, chunk_size=25, overlap=5):
+                summary = self.extract_rows(chunk_rows)
+                all_fact_ids.extend(summary.fact_ids)
+                batch_failures += summary.extraction_failures
+                total_failures += summary.extraction_failures
+            if batch_failures > 0:
                 with self.connection:
                     self.import_runs.increment_extraction_failures(
-                        batch_id, summary.extraction_failures
+                        batch_id, batch_failures
                     )
-            total_failures += summary.extraction_failures
 
-        return ExtractionSummary(fact_ids=all_fact_ids, extraction_failures=total_failures)
+        return ExtractionSummary(
+            fact_ids=all_fact_ids,
+            extraction_failures=total_failures,
+            total_pending_before=total_pending,
+            remaining_pending=remaining_pending,
+            estimated_batches_remaining=estimated_batches_remaining,
+            limit_applied=limit,
+        )
 
     def _upsert_fact(
         self,
@@ -383,3 +426,20 @@ def _list_of_dicts(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def _chunk_rows(rows: list[sqlite3.Row], *, chunk_size: int, overlap: int = 0) -> list[list[sqlite3.Row]]:
+    """Split a row list into smaller overlapping extractor batches."""
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if overlap < 0 or overlap >= chunk_size:
+        raise ValueError("overlap must be non-negative and less than chunk_size")
+
+    chunks = []
+    step = chunk_size - overlap
+    for index in range(0, len(rows), step):
+        chunks.append(rows[index:index + chunk_size])
+        if index + chunk_size >= len(rows):
+            break
+    return chunks

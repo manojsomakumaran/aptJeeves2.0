@@ -396,7 +396,7 @@ say when information is unavailable
 mark government/process answers as resident-discussed info unless officially verified
 ```
 
-Temperature should be low, but that is only one control. Grounding should come from:
+Temperature should be low (0.1), and grounding should come from:
 
 ```text
 strict context
@@ -416,6 +416,8 @@ source/reference count
 confidence or caveat
 sanitized citation snippets where useful
 ```
+
+Current implementation uses `gpt-4-mini` for cost-effective grounded reasoning with privacy guardrails.
 
 **8. Guardrails**
 
@@ -456,12 +458,25 @@ keep restricted raw payloads only in explicit debug/quarantine mode, if enabled
 
 Use structured events instead of plain text logs. Each pipeline stage should emit compact records that can be filtered by import batch, message fingerprint, fact ID, query ID, and model/prompt version.
 
+Current implementation integrates with **Langfuse** for LLM observability:
+
+```text
+LangfuseClient captures:
+- LLM extraction calls with sanitized prompts and responses
+- Embedding calls for vector indexing
+- Answer generation traces with context and guardrail results
+- Query classification and retrieval events
+- All traces linked by trace_id for end-to-end debugging
+```
+
+Langfuse integration is optional. If `LANGFUSE_PUBLIC_KEY` is not set, the system uses `NullLangfuseClient` and runs without external observability.
+
 Core observability records:
 
 ```text
 import_runs
 pipeline_events
-llm_calls
+llm_calls (with Langfuse traces)
 extraction_decisions
 retrieval_traces
 rerank_traces

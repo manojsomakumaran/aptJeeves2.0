@@ -2,17 +2,73 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-from aptjeeves.config import load_settings, resolve_db_path
+from aptjeeves.answering.formatter import AnswerFormatter
+from aptjeeves.config import Settings, load_settings, resolve_db_path
 from aptjeeves.extraction.fake_extractor import FakeExtractor
+from aptjeeves.extraction.llm_extractor import LLMExtractor
 from aptjeeves.extraction.service import ExtractionService
 from aptjeeves.indexing.indexer import VectorIndexingService
 from aptjeeves.ingestion.service import ChatIngestionService, IngestRequest
+from aptjeeves.observability.replay import ReplayService
+from aptjeeves.retrieval.intent import KeywordIntentClassifier, OpenAIIntentClassifier
+from aptjeeves.retrieval.service import QueryService
 from aptjeeves.storage.db import apply_migrations, connect
-from aptjeeves.storage.repositories import ImportRunRepository
+from aptjeeves.storage.repositories import ImportRunRepository, QueryRunRepository, RawMessageRepository
+
+
+def _build_embedding_model(settings: Settings) -> object:
+    """Instantiate the embedding model specified in settings."""
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if settings.embedding_model and settings.embedding_model != "local" and api_key:
+        from aptjeeves.indexing.openai_embeddings import OpenAIEmbeddingModel
+
+        return OpenAIEmbeddingModel(api_key=api_key, model=settings.embedding_model)
+
+    from aptjeeves.indexing.embeddings import LocalTokenEmbeddingModel
+
+    return LocalTokenEmbeddingModel()
+
+
+def _build_answerer(settings: Settings) -> object:
+    """Instantiate the answerer (LLM or template formatter) based on settings."""
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if settings.llm_model and settings.llm_provider == "openai" and api_key:
+        from aptjeeves.answering.llm_answerer import LLMAnswerer
+        from aptjeeves.observability.langfuse_client import build_langfuse_client
+
+        langfuse = build_langfuse_client(
+            secret_key=settings.langfuse_secret_key,
+            public_key=settings.langfuse_public_key,
+            host=settings.langfuse_host,
+        )
+        return LLMAnswerer(api_key=api_key, model=settings.llm_model, langfuse_client=langfuse)
+
+    return AnswerFormatter()
+
+
+def _build_extractor(settings: Settings) -> object:
+    """Instantiate the extractor backend for extraction commands."""
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if settings.extraction_backend == "openai" and api_key:
+        return LLMExtractor(api_key=api_key, model=settings.extraction_model)
+    return FakeExtractor()
+
+
+def _build_intent_classifier(settings: Settings) -> object:
+    """Instantiate the intent classifier backend for ask commands."""
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if settings.intent_backend == "openai" and api_key:
+        return OpenAIIntentClassifier(api_key=api_key, model=settings.intent_model)
+    return KeywordIntentClassifier()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ingest.add_argument("--timezone", default=None)
     ingest.add_argument("--date-order", default="DMY", choices=["DMY", "MDY"])
+    ingest.add_argument(
+        "--upload-dir",
+        default=None,
+        type=Path,
+        help="Directory containing uploaded attachments referenced by the export (e.g. .vcf files).",
+    )
 
     status = subparsers.add_parser("import-status", help="Show an import summary.")
     status.add_argument(
@@ -54,6 +116,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apartment chatbot name used to select the database.",
     )
     status.add_argument("--batch", required=True)
+
+    query_status = subparsers.add_parser("query-status", help="Show a query summary.")
+    query_status.add_argument(
+        "--apartment",
+        default=None,
+        help="Apartment chatbot name used to select the database.",
+    )
+    query_status.add_argument("--query-id", required=True)
 
     extract = subparsers.add_parser(
         "extract-pending",
@@ -66,6 +136,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extract.add_argument("--limit", type=int, default=100)
 
+    reset_failed = subparsers.add_parser(
+        "reset-failed",
+        help="Reset all 'failed' raw messages back to 'new' for re-extraction.",
+    )
+    reset_failed.add_argument(
+        "--apartment",
+        default=None,
+        help="Apartment chatbot name used to select the database.",
+    )
+
     index = subparsers.add_parser(
         "index-facts",
         help="Create or refresh vector entries for canonical facts.",
@@ -76,6 +156,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apartment chatbot name used to select the database.",
     )
     index.add_argument("--limit", type=int, default=100)
+
+    ask_parser = subparsers.add_parser("ask", help="Ask a question about the apartment community.")
+    ask_parser.add_argument("query", help="The resident question to answer.")
+    ask_parser.add_argument(
+        "--apartment",
+        default=None,
+        help="Apartment chatbot name used to select the database.",
+    )
+    ask_parser.add_argument("--top-k", type=int, default=10, help="Maximum retrieval candidates.")
+    ask_parser.add_argument("--max-facts", type=int, default=5, help="Maximum facts in the answer.")
+
+    replay_import = subparsers.add_parser("replay-import", help="Replay extraction and indexing for an import batch.")
+    replay_import.add_argument("--batch", required=True)
+    replay_import.add_argument("--from-stage", required=True, choices=["extraction"])
+    replay_import.add_argument(
+        "--apartment",
+        default=None,
+        help="Apartment chatbot name used to select the database.",
+    )
+
+    replay_fact = subparsers.add_parser("replay-fact-index", help="Replay indexing for one fact.")
+    replay_fact.add_argument("--fact", required=True)
+    replay_fact.add_argument(
+        "--apartment",
+        default=None,
+        help="Apartment chatbot name used to select the database.",
+    )
+
+    replay_query = subparsers.add_parser("replay-query", help="Replay one query from stored redacted text.")
+    replay_query.add_argument("--query-id", required=True)
+    replay_query.add_argument(
+        "--apartment",
+        default=None,
+        help="Apartment chatbot name used to select the database.",
+    )
+    replay_query.add_argument("--top-k", type=int, default=10, help="Maximum retrieval candidates.")
+    replay_query.add_argument("--max-facts", type=int, default=5, help="Maximum facts in the answer.")
 
     return parser
 
@@ -110,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
                 chat_name=chat_name,
                 default_timezone=args.timezone or settings.default_timezone,
                 date_order=args.date_order,
+                upload_dir=args.upload_dir,
             )
         )
         print(
@@ -153,8 +271,56 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "query-status":
+        repo = QueryRunRepository(connection)
+        summary = repo.get_summary(args.query_id)
+        if summary is None:
+            print(f"Query not found: {args.query_id}", file=sys.stderr)
+            return 1
+        print(
+            json.dumps(
+                {
+                    "query_id": summary.query_id,
+                    "status": summary.status,
+                    "query_text_redacted": summary.query_text_redacted,
+                    "query_intent": summary.query_intent,
+                    "final_action": summary.final_action,
+                    "retrieval_trace_id": summary.retrieval_trace_id,
+                    "guardrail_events_count": summary.guardrail_events_count,
+                    "created_at": summary.created_at,
+                    "completed_at": summary.completed_at,
+                    "db_path": str(db_path),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "reset-failed":
+        repo = RawMessageRepository(connection)
+        with connection:
+            count = repo.reset_failed()
+
+        if count > 0:
+            print(f"Reset {count} failed messages back to 'new'. You can now run extract-pending.", file=sys.stderr)
+        else:
+            print("No failed messages found.", file=sys.stderr)
+
+        print(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "messages_reset": count,
+                    "db_path": str(db_path),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
     if args.command == "extract-pending":
-        service = ExtractionService(connection, FakeExtractor())
+        extractor = _build_extractor(settings)
+        service = ExtractionService(connection, extractor)
         summary = service.extract_pending(limit=args.limit)
         print(
             json.dumps(
@@ -164,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
                     "extraction_failures": summary.extraction_failures,
                     "fact_ids": summary.fact_ids,
                     "db_path": str(db_path),
-                    "extractor": "fake",
+                    "extractor": settings.extraction_backend if settings.extraction_backend in ("fake", "openai") else "fake",
                 },
                 indent=2,
             )
@@ -172,20 +338,84 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "index-facts":
-        service = VectorIndexingService(connection)
-        vector_ids = service.index_pending(limit=args.limit)
+        embedding_model = _build_embedding_model(settings)
+        service = VectorIndexingService(connection, embedding_model)
+        summary = service.index_pending(limit=args.limit)
+
+        if summary.remaining_pending > 0:
+            print(f"Indexed {summary.total_pending_before - summary.remaining_pending} facts. {summary.remaining_pending} facts remaining (approx. {summary.estimated_batches_remaining} runs left).", file=sys.stderr)
+        else:
+            print("Vector indexing backlog cleared.", file=sys.stderr)
+
         print(
             json.dumps(
                 {
                     "status": "completed",
-                    "vectors_upserted": len(vector_ids),
-                    "vector_ids": vector_ids,
+                    "vectors_upserted": len(summary.vector_ids),
+                    "total_pending_before": summary.total_pending_before,
+                    "remaining_pending": summary.remaining_pending,
+                    "estimated_batches_remaining": summary.estimated_batches_remaining,
+                    "limit_applied": summary.limit_applied,
+                    "vector_ids": summary.vector_ids,
                     "db_path": str(db_path),
                     "embedding_model": service.embedding_model.model_version,
                 },
                 indent=2,
             )
         )
+        return 0
+
+    if args.command == "ask":
+        embedding_model = _build_embedding_model(settings)
+        answerer = _build_answerer(settings)
+        service = QueryService(
+            connection,
+            embedding_model=embedding_model,
+            answerer=answerer,
+            intent_classifier=_build_intent_classifier(settings),
+            top_k=args.top_k,
+            max_answer_facts=args.max_facts,
+        )
+        answer = service.ask(args.query)
+        output = AnswerFormatter().to_json(answer)
+        output["db_path"] = str(db_path)
+        print(json.dumps(output, indent=2))
+        return 0
+
+    if args.command == "replay-import":
+        replay = ReplayService(connection)
+        result = replay.replay_import(
+            import_batch_id=args.batch,
+            extractor=_build_extractor(settings),
+            embedding_model=_build_embedding_model(settings),
+        )
+        result["db_path"] = str(db_path)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "replay-fact-index":
+        replay = ReplayService(connection)
+        result = replay.replay_fact_index(
+            fact_id=args.fact,
+            embedding_model=_build_embedding_model(settings),
+        )
+        result["db_path"] = str(db_path)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "replay-query":
+        replay = ReplayService(connection)
+        answer = replay.replay_query(
+            query_id=args.query_id,
+            embedding_model=_build_embedding_model(settings),
+            answerer=_build_answerer(settings),
+            intent_classifier=_build_intent_classifier(settings),
+            top_k=args.top_k,
+            max_answer_facts=args.max_facts,
+        )
+        output = AnswerFormatter().to_json(answer)
+        output["db_path"] = str(db_path)
+        print(json.dumps(output, indent=2))
         return 0
 
     raise AssertionError(f"Unhandled command: {args.command}")

@@ -13,12 +13,12 @@ Primary goals:
 ```text
 ingest repeated monthly chat exports safely
 dedupe old messages using stable message fingerprints
-extract structured facts with LLM assistance
+extract structured facts with LLM assistance (gpt-4-mini)
 store canonical facts in SQLite as the source of truth
-index sanitized facts for semantic retrieval
-answer only from retrieved approved context
+index sanitized facts for semantic retrieval (text-embedding-3-small)
+answer only from retrieved approved context (gpt-4-mini, temp=0.1)
 prevent resident PII leakage
-make every important decision observable and replayable
+make every important decision observable and replayable (Langfuse integration)
 ```
 
 Non-goals for the first implementation:
@@ -85,6 +85,7 @@ src/
       repositories.py
     indexing/
       embeddings.py
+      openai_embeddings.py
       vector_store.py
       indexer.py
     retrieval/
@@ -94,10 +95,11 @@ src/
       context.py
     answering/
       prompts.py
-      answerer.py
+      llm_answerer.py
       formatter.py
     observability/
       events.py
+      langfuse_client.py
       traces.py
       replay.py
 tests/
@@ -1314,6 +1316,29 @@ implement answer prompt
 implement final response formatter
 ```
 
+Implementation status:
+
+```text
+implemented keyword-based deterministic intent classifier (6 intent types)
+implemented token-vector cosine similarity retriever against active vector_entries
+implemented transparent reranking formula from section 8.3
+implemented structured context builder with privacy filtering
+implemented template-based answer formatter with citations (no LLM)
+implemented retrieval_traces and guardrail_events tables
+implemented QueryService orchestrator for full ask pipeline
+implemented CLI ask command with JSON output
+config loads .env from project root before reading env vars
+```
+
+Still future work:
+
+```text
+real LLM-based intent classification
+real semantic embedding retrieval
+LLM answer generation
+final guardrail validation on generated answers
+```
+
 ### Milestone 6: Guardrails, Replay, And Hardening
 
 ```text
@@ -1322,6 +1347,51 @@ implement query traces and retrieval traces
 implement replay commands
 add privacy leakage integration tests
 add import/query status commands
+```
+
+Implementation status:
+
+```text
+implemented deterministic final answer guardrail validator
+implemented query_runs ledger for query status and replay
+implemented replay-import, replay-fact-index, replay-query, and query-status CLI commands
+implemented replay service on sanitized stored inputs
+implemented guardrail and replay integration tests
+```
+
+Still future work:
+
+```text
+repair_with_llm flow for safe answer repair
+human review workflow for restricted facts
+broader replay coverage across extraction chunks and single-message repair
+```
+
+### Milestone 7: Model-Backed Intelligence
+
+```text
+implement provider-backed extractor
+implement optional LLM-backed intent classifier
+wire backend selection through config and CLI
+validate provider-backed extraction and ask flows
+record provider versions in observability payloads
+```
+
+Implementation status:
+
+```text
+implemented OpenAI-backed LLMExtractor using the shared extraction contract
+implemented OpenAI-backed intent classifier with deterministic keyword fallback
+added extraction and intent backend selection through config and CLI wiring
+validated provider-backed extractor and ask fallback flows with mocked tests
+```
+
+Still future work:
+
+```text
+multi-provider support beyond OpenAI
+production prompt tuning for extraction and intent classification
+live end-to-end validation against real provider responses
 ```
 
 ## 15. First Build Recommendation
