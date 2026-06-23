@@ -41,14 +41,8 @@ def _build_answerer(settings: Settings) -> object:
     api_key = os.environ.get("OPENAI_API_KEY")
     if settings.llm_model and settings.llm_provider == "openai" and api_key:
         from aptjeeves.answering.llm_answerer import LLMAnswerer
-        from aptjeeves.observability.langfuse_client import build_langfuse_client
 
-        langfuse = build_langfuse_client(
-            secret_key=settings.langfuse_secret_key,
-            public_key=settings.langfuse_public_key,
-            host=settings.langfuse_host,
-        )
-        return LLMAnswerer(api_key=api_key, model=settings.llm_model, langfuse_client=langfuse)
+        return LLMAnswerer(api_key=api_key, model=settings.llm_model)
 
     return AnswerFormatter()
 

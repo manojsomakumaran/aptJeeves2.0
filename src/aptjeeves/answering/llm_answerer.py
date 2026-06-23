@@ -4,6 +4,9 @@ import json
 import time
 from typing import Any
 
+from langfuse.decorators import observe, langfuse_context
+from langfuse.openai import OpenAI
+
 from aptjeeves.answering.formatter import AnswerResponse, Citation
 from aptjeeves.retrieval.context import FactContext, QueryContext
 
@@ -32,16 +35,20 @@ class LLMAnswerer:
         *,
         api_key: str,
         model: str = "gpt-4o-mini",
-        langfuse_client: Any = None,
     ) -> None:
-        import openai
-
-        self._client = openai.OpenAI(api_key=api_key)
+        # Use the Langfuse-wrapped OpenAI client for automatic LLM tracing
+        self._client = OpenAI(api_key=api_key)
         self._model = model
-        self._langfuse = langfuse_client
 
+    @observe(name="ask_answerer")
     def answer(self, context: QueryContext, *, query: str = "") -> AnswerResponse:
         """Generate a grounded answer from the retrieved query context."""
+        
+        # Enrich the current trace with metadata automatically
+        langfuse_context.update_current_trace(
+            tags=[context.intent] if context.intent else [],
+            session_id=context.query_id
+        )
 
         if not context.facts:
             return AnswerResponse(
@@ -63,40 +70,16 @@ class LLMAnswerer:
             },
         ]
 
-        trace = self._langfuse.trace(name="ask", query_id=context.query_id) if self._langfuse else None
-        generation = None
-        if trace:
-            generation = trace.start_generation(
-                name="answer_generation",
-                model=self._model,
-                input=messages,
-            )
-
-        start = time.monotonic()
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=1024,
-            )
-        except Exception as exc:
-            if generation:
-                generation.end(error=str(exc))
-            raise
+        # Langfuse automatically captures tokens, latency, inputs, and outputs here!
+        response = self._client.chat.completions.create(
+            name="answer_generation",
+            model=self._model,
+            messages=messages,
+            temperature=0.1,
+            max_tokens=1024,
+        )
 
         answer_text = response.choices[0].message.content.strip()
-        usage = response.usage
-        latency_ms = int((time.monotonic() - start) * 1000)
-
-        if generation:
-            generation.end(
-                output=answer_text,
-                usage={
-                    "input": usage.prompt_tokens if usage else 0,
-                    "output": usage.completion_tokens if usage else 0,
-                },
-            )
 
         citations = [
             Citation(
