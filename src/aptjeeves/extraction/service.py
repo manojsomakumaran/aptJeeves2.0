@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+﻿﻿from __future__ import annotations
 
 import sqlite3
 import logging
@@ -19,15 +19,6 @@ from aptjeeves.storage.models import (
     ServiceContactUpsert,
 )
 from aptjeeves.storage.repositories import CanonicalFactRepository, ImportRunRepository, RawMessageRepository
-
-
-_root_logger = logging.getLogger("aptjeeves")
-if not _root_logger.handlers:
-    _fh = logging.FileHandler("aptjeeves_debug.log")
-    _fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-    _root_logger.addHandler(_fh)
-    _root_logger.setLevel(logging.DEBUG)
-
 logger = logging.getLogger(__name__)
 
 

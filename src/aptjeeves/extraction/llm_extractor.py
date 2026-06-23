@@ -5,15 +5,10 @@ import logging
 import re
 from dataclasses import asdict
 from typing import Any
+import langfuse.openai
 
+from langfuse.decorators import observe
 from aptjeeves.extraction.schemas import MessageForExtraction
-
-_root_logger = logging.getLogger("aptjeeves")
-if not _root_logger.handlers:
-    _fh = logging.FileHandler("aptjeeves_debug.log")
-    _fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-    _root_logger.addHandler(_fh)
-    _root_logger.setLevel(logging.DEBUG)
 
 logger = logging.getLogger(__name__)
 
@@ -57,14 +52,12 @@ class LLMExtractor:
 
     prompt_version = LLM_EXTRACTOR_PROMPT_VERSION
 
-    def __init__(self, *, api_key: str, model: str = "gpt-4o-mini", langfuse_client: Any = None) -> None:
-        import openai
-
-        self._client = openai.OpenAI(api_key=api_key)
+    def __init__(self, *, api_key: str, model: str = "gpt-4o-mini") -> None:
+        self._client = OpenAI(api_key=api_key)
         self._model = model
         self.model_version = f"openai_extractor_{model}_v1"
-        self._lf = langfuse_client
 
+    @observe(name="llm_extract_facts")
     def extract(self, messages: list[MessageForExtraction], trace_id: str | None = None) -> dict[str, Any]:
         logger.info(f"Sending {len(messages)} messages to OpenAI extractor ({self._model})")
         payload = {"messages": [asdict(message) for message in messages]}
@@ -79,15 +72,6 @@ class LLMExtractor:
             "response_format": {"type": "json_object"},
         }
 
-        lf_gen = None
-        if self._lf:
-            lf_trace = self._lf.trace(name="llm_extraction", query_id=trace_id or "unknown_trace")
-            lf_gen = lf_trace.start_generation(
-                name="openai_extract", 
-                model=self._model, 
-                input=request["messages"]
-            )
-
         try:
             response = self._client.chat.completions.create(**request)
         except TypeError:
@@ -95,18 +79,9 @@ class LLMExtractor:
             response = self._client.chat.completions.create(**request)
         except Exception as e:
             logger.error("Error during LLM extraction request to OpenAI", exc_info=True)
-            if lf_gen:
-                lf_gen.end(error=str(e))
             raise
 
         content = response.choices[0].message.content
-        usage = getattr(response, "usage", None)
-        if lf_gen and content and usage:
-            lf_gen.end(
-                output=content,
-                usage={"input": getattr(usage, "prompt_tokens", 0), "output": getattr(usage, "completion_tokens", 0)}
-            )
-
         if not content:
             logger.error("Extractor returned empty content")
             raise ValueError("Extractor returned empty content")
