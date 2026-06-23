@@ -25,7 +25,18 @@ class ReplayService:
         rows = self.raw_messages.list_by_import_batch(import_batch_id)
         if not rows:
             raise ValueError(f"Import batch not found: {import_batch_id}")
-        trace_id = f"trace_{uuid.uuid4().hex}"
+        trace_id = f"trace_replay_import_{uuid.uuid4().hex}"
+        self.events.emit(
+            trace_id=trace_id,
+            event_type="replay_import_started",
+            stage="replay",
+            status="started",
+            import_batch_id=import_batch_id,
+            payload={
+                "from_stage": "extraction",
+                "message_count": len(rows),
+            },
+        )
         extraction = ExtractionService(self.connection, extractor).extract_rows(rows)
         indexer = VectorIndexingService(self.connection, embedding_model)
         vector_ids: list[str] = []
@@ -39,6 +50,7 @@ class ReplayService:
                 trace_id=trace_id,
                 event_type="replay_import_completed",
                 stage="replay",
+                status="success",
                 import_batch_id=import_batch_id,
                 payload={
                     "from_stage": "extraction",
@@ -57,13 +69,22 @@ class ReplayService:
         fact = self.facts.get_fact(fact_id)
         if fact is None:
             raise ValueError(f"Fact not found: {fact_id}")
-        trace_id = f"trace_{uuid.uuid4().hex}"
+        trace_id = f"trace_replay_fact_{uuid.uuid4().hex}"
+        self.events.emit(
+            trace_id=trace_id,
+            event_type="replay_fact_index_started",
+            stage="replay",
+            status="started",
+            fact_id=fact_id,
+            payload={},
+        )
         vector_id = VectorIndexingService(self.connection, embedding_model).index_fact(fact, trace_id=trace_id)
         with self.connection:
             self.events.emit(
                 trace_id=trace_id,
                 event_type="replay_fact_index_completed",
                 stage="replay",
+                status="success",
                 fact_id=fact_id,
                 payload={"vector_id": vector_id},
             )
@@ -82,6 +103,16 @@ class ReplayService:
         query = self.queries.get(query_id)
         if query is None:
             raise ValueError(f"Query not found: {query_id}")
+        trace_id = f"trace_replay_query_{uuid.uuid4().hex}"
+        self.events.emit(
+            trace_id=trace_id,
+            event_type="replay_query_started",
+            stage="replay",
+            status="started",
+            query_id=query_id,
+            payload={"original_query_text": query["query_text_redacted"]},
+        )
+
         service = QueryService(
             self.connection,
             embedding_model=embedding_model,
@@ -93,9 +124,10 @@ class ReplayService:
         answer = service.ask(query["query_text_redacted"])
         with self.connection:
             self.events.emit(
-                trace_id=f"trace_{uuid.uuid4().hex}",
+                trace_id=trace_id,
                 event_type="replay_query_completed",
                 stage="replay",
+                status="success",
                 query_id=answer.query_id,
                 payload={
                     "replayed_query_id": query_id,

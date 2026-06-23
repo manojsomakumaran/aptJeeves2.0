@@ -10,11 +10,13 @@ from typing import Any
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from langfuse.decorators import observe, langfuse_context
 
 from aptjeeves.config import load_settings, resolve_db_path, Settings
 from aptjeeves.storage.db import connect, apply_migrations
 from aptjeeves.storage.repositories import RawMessageRepository, CanonicalFactRepository, VectorEntryRepository
 from aptjeeves.cli import _build_extractor, _build_embedding_model, _build_answerer, _build_intent_classifier
+from aptjeeves.observability.events import ObservabilityService
 from aptjeeves.extraction.service import ExtractionService
 from aptjeeves.indexing.indexer import VectorIndexingService
 from aptjeeves.ingestion.service import ChatIngestionService, IngestRequest
@@ -30,7 +32,7 @@ app = FastAPI(title="AptJeeves 2.0 API")
 # Allow React frontend to communicate with this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict this to your frontend URL
+    allow_origins=["http://localhost:5173", "https://your-production-domain.com"],  # In production, restrict this to your frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -85,8 +87,13 @@ def _apply_local_settings(conn, settings: Settings) -> Settings:
 # --- Routes: Chat & Query ---
 
 @app.post("/api/{apartment}/ask")
+@observe(name="api_ask_question")
 def ask_question(apartment: str, req: AskRequest, settings: Settings = Depends(get_settings)):
     """Ask a question to the AptJeeves AI for a specific apartment."""
+    langfuse_context.update_current_trace(
+        session_id=apartment,
+    )
+    
     db_path = resolve_db_path(settings=settings, explicit_db_path=None, apartment=apartment)
     conn = connect(db_path)
     apply_migrations(conn)
@@ -354,17 +361,25 @@ def get_recent_logs(apartment: str, limit: int = 100, settings: Settings = Depen
 def run_extraction_task(db_path: Path, settings: Settings, limit: int = 100):
     """Background task to process the extraction queue."""
     conn = connect(db_path)
+    events = ObservabilityService(conn)
+    trace_id = f"trace_bg_extract_{uuid.uuid4().hex}"
     try:
+        events.emit(trace_id=trace_id, event_type="background_task_started", stage="extraction", payload={"task": "run_extraction_task", "limit": limit})
         local_settings = _apply_local_settings(conn, settings)
         extractor = _build_extractor(local_settings)
         service = ExtractionService(conn, extractor)
-        service.extract_pending(limit=limit)
+        summary = service.extract_pending(limit=limit)
+        events.emit(trace_id=trace_id, event_type="background_task_completed", stage="extraction", status="success", payload={"task": "run_extraction_task", "facts_extracted": len(summary.fact_ids)})
+    except Exception as e:
+        logger.error(f"Background extraction task failed: {e}", exc_info=True)
+        events.emit(trace_id=trace_id, event_type="background_task_failed", stage="extraction", status="error", payload={"task": "run_extraction_task", "error": str(e)})
     finally:
         conn.close()
 
 @app.post("/api/{apartment}/extract", response_model=ActionResponse)
 def trigger_extraction(apartment: str, background_tasks: BackgroundTasks, settings: Settings = Depends(get_settings)):
     """Start a background job to extract facts from pending messages."""
+    import uuid
     db_path = resolve_db_path(settings=settings, explicit_db_path=None, apartment=apartment)
     background_tasks.add_task(run_extraction_task, db_path, settings, 100)
     return ActionResponse(status="success", message="Extraction background task started.")
@@ -372,18 +387,27 @@ def trigger_extraction(apartment: str, background_tasks: BackgroundTasks, settin
 
 def run_indexing_task(db_path: Path, settings: Settings, limit: int = 100):
     """Background task to process the indexing queue."""
+    import uuid
     conn = connect(db_path)
+    events = ObservabilityService(conn)
+    trace_id = f"trace_bg_index_{uuid.uuid4().hex}"
     try:
+        events.emit(trace_id=trace_id, event_type="background_task_started", stage="indexing", payload={"task": "run_indexing_task", "limit": limit})
         local_settings = _apply_local_settings(conn, settings)
         embedding_model = _build_embedding_model(local_settings)
         service = VectorIndexingService(conn, embedding_model)
-        service.index_pending(limit=limit)
+        summary = service.index_pending(limit=limit)
+        events.emit(trace_id=trace_id, event_type="background_task_completed", stage="indexing", status="success", payload={"task": "run_indexing_task", "vectors_upserted": summary.vectors_upserted})
+    except Exception as e:
+        logger.error(f"Background indexing task failed: {e}", exc_info=True)
+        events.emit(trace_id=trace_id, event_type="background_task_failed", stage="indexing", status="error", payload={"task": "run_indexing_task", "error": str(e)})
     finally:
         conn.close()
 
 @app.post("/api/{apartment}/index", response_model=ActionResponse)
 def trigger_indexing(apartment: str, background_tasks: BackgroundTasks, settings: Settings = Depends(get_settings)):
     """Start a background job to index pending facts."""
+    import uuid
     db_path = resolve_db_path(settings=settings, explicit_db_path=None, apartment=apartment)
     background_tasks.add_task(run_indexing_task, db_path, settings, 100)
     return ActionResponse(status="success", message="Indexing background task started.")
