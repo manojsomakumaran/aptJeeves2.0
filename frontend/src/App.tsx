@@ -335,13 +335,27 @@ function IngestionManager() {
   const [attachmentFolder, setAttachmentFolder] = useState<string>('');
   const [isUploading, setIsUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string>('');
+  const [isResetting, setIsResetting] = useState(false);
+  const [resetStatus, setResetStatus] = useState('');
 
-  const { data: statusData, isLoading: statusLoading } = useQuery({
+  const { data: statusData } = useQuery({
     queryKey: ['status', apartment],
     queryFn: async () => {
       if (!apartment) return null;
       const res = await fetch(`/api/${apartment}/status`);
       if (!res.ok) throw new Error('Failed to fetch status');
+      return res.json();
+    },
+    refetchInterval: 3000,
+    enabled: !!apartment,
+  });
+
+  const { data: logsData } = useQuery({
+    queryKey: ['logs', apartment, 'ingestion-page'],
+    queryFn: async () => {
+      if (!apartment) return null;
+      const res = await fetch(`/api/${apartment}/logs?limit=30`);
+      if (!res.ok) throw new Error('Failed to fetch logs');
       return res.json();
     },
     refetchInterval: 3000,
@@ -391,8 +405,86 @@ function IngestionManager() {
     }
   };
 
+  const handleResetFailed = async () => {
+    setIsResetting(true);
+    setResetStatus('');
+    try {
+      const res = await fetch(`/api/${apartment}/reset-failed`, { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to reset messages');
+      const data = await res.json();
+      setResetStatus(`Success: Reset ${data.details?.count || 0} failed messages.`);
+      queryClient.invalidateQueries({ queryKey: ['status', apartment] });
+    } catch (err: any) {
+      setResetStatus(`Error: ${err.message}`);
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
   if (!apartment) {
     return <div className="flex items-center justify-center h-full text-slate-500">Please select an apartment to manage ingestion.</div>;
+  }
+
+  // Evaluate Ingestion Step
+  const lastImport = statusData?.history?.[0];
+  let ingestStatus = 'idle';
+  if (isUploading) {
+    ingestStatus = 'uploading';
+  } else if (lastImport) {
+    ingestStatus = lastImport.messages === 0 ? 'completed-dedup' : 'completed';
+  }
+
+  // Evaluate Extraction Step
+  let extractionStatus = 'idle';
+  if (statusData) {
+    if (statusData.messages.total_new > 0) {
+      extractionStatus = 'in-progress';
+    } else if (statusData.messages.total_failed > 0) {
+      extractionStatus = 'failed';
+    } else if (statusData.messages.total_extracted > 0) {
+      extractionStatus = 'completed';
+    }
+  }
+
+  // Parse extraction error details from logs
+  const lastExtractionErrorEvent = logsData?.events?.find(
+    (e: any) => e.stage === 'extraction' && e.status === 'error'
+  );
+  let extractionErrorText = '';
+  if (lastExtractionErrorEvent) {
+    try {
+      const parsed = JSON.parse(lastExtractionErrorEvent.details);
+      extractionErrorText = parsed.error || lastExtractionErrorEvent.details;
+    } catch {
+      extractionErrorText = lastExtractionErrorEvent.details;
+    }
+  }
+
+  // Evaluate Indexing Step
+  let indexingStatus = 'idle';
+  if (statusData) {
+    if (statusData.facts.pending_indexing > 0) {
+      indexingStatus = 'in-progress';
+    } else if (statusData.vectors.active > 0) {
+      indexingStatus = 'completed';
+    }
+  }
+
+  // Parse indexing error details from logs
+  const lastIndexingErrorEvent = logsData?.events?.find(
+    (e: any) => e.stage === 'indexing' && e.status === 'error'
+  );
+  let indexingErrorText = '';
+  if (lastIndexingErrorEvent) {
+    try {
+      const parsed = JSON.parse(lastIndexingErrorEvent.details);
+      indexingErrorText = parsed.error || lastIndexingErrorEvent.details;
+    } catch {
+      indexingErrorText = lastIndexingErrorEvent.details;
+    }
+    if (indexingStatus === 'idle') {
+      indexingStatus = 'failed';
+    }
   }
 
   return (
@@ -437,8 +529,8 @@ function IngestionManager() {
 
           <div className="pt-2 flex items-center justify-between">
              <button type="submit" disabled={!chatFile || isUploading} className="bg-blue-600 text-white px-6 py-2.5 rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium flex items-center gap-2 transition-colors">
-               <CloudUpload size={18} />
-               {isUploading ? 'Uploading...' : 'Start Ingestion'}
+                <CloudUpload size={18} />
+                {isUploading ? 'Uploading...' : 'Start Ingestion'}
              </button>
              {uploadMessage && (
                <span className={`text-sm font-medium ${uploadMessage.startsWith('Error') ? 'text-red-600' : 'text-green-600'}`}>
@@ -450,72 +542,252 @@ function IngestionManager() {
       </div>
 
       {statusData && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="space-y-6">
+          {/* Visual Pipeline Flow */}
           <div className="bg-white border border-slate-200 shadow-sm rounded-xl p-6">
-            <h2 className="text-xl font-semibold text-slate-800 mb-4 flex items-center gap-2">
-              <SquareTerminal size={20} className="text-slate-500" />
-              Processing Pipeline
+            <h2 className="text-xl font-semibold text-slate-800 mb-6 flex items-center gap-2">
+              <Activity size={20} className="text-blue-500 animate-pulse" />
+              Visual Ingestion & Processing Pipeline
             </h2>
-            <div className="space-y-4">
-               <div>
-                  <div className="flex justify-between text-sm mb-1">
-                    <span className="text-slate-600 font-medium">Extraction Queue (New Messages)</span>
-                    <span className="text-slate-800 font-bold">{statusData.messages.total_new} pending</span>
+            
+            <div className="grid grid-cols-1 lg:grid-cols-5 items-stretch gap-4 lg:gap-2">
+              {/* Step 1: Ingestion */}
+              <div className={`p-4 rounded-xl border flex flex-col justify-between col-span-1 lg:col-span-1.5 transition-all ${
+                ingestStatus === 'uploading' ? 'border-blue-500 bg-blue-50/30' :
+                ingestStatus.startsWith('completed') ? 'border-green-200 bg-green-50/10' :
+                'border-slate-200 bg-slate-50/20'
+              }`}>
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Step 1</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                      ingestStatus === 'uploading' ? 'bg-blue-100 text-blue-800' :
+                      ingestStatus === 'completed' ? 'bg-green-100 text-green-800' :
+                      ingestStatus === 'completed-dedup' ? 'bg-amber-100 text-amber-800' :
+                      'bg-slate-100 text-slate-600'
+                    }`}>
+                      {ingestStatus === 'uploading' ? 'Uploading' :
+                       ingestStatus === 'completed' ? 'Success' :
+                       ingestStatus === 'completed-dedup' ? 'Deduplicated' : 'Idle'}
+                    </span>
                   </div>
-                  <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden border border-slate-200">
-                    <div className="bg-blue-500 h-2.5 rounded-full transition-all" style={{ width: statusData.messages.total_new > 0 ? '100%' : '0%' }}></div>
-                  </div>
-               </div>
-               
-               <div>
-                  <div className="flex justify-between text-sm mb-1">
-                    <span className="text-slate-600 font-medium">Failed Extractions</span>
-                    <span className="text-slate-800 font-bold">{statusData.messages.total_failed}</span>
-                  </div>
-               </div>
+                  <h3 className="font-semibold text-slate-800 text-sm mb-1 flex items-center gap-1.5">
+                    <CloudUpload size={16} className="text-slate-500" /> Ingest Chat Export
+                  </h3>
+                  <p className="text-xs text-slate-500">Reads exports, fingerprints and deduplicates messages.</p>
+                </div>
+                <div className="mt-4 pt-3 border-t border-slate-100 text-xs">
+                  {isUploading ? (
+                    <div className="text-blue-600 animate-pulse">Uploading file...</div>
+                  ) : lastImport ? (
+                    <div>
+                      <div className="font-medium text-slate-700">Last Import: {lastImport.batch_id}</div>
+                      {lastImport.messages === 0 ? (
+                        <div className="text-amber-600 mt-1">
+                          Idempotent skip: 0 new messages inserted (already exists).
+                        </div>
+                      ) : (
+                        <div className="text-green-600 mt-1">
+                          Successfully inserted {lastImport.messages} new messages.
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-slate-400">Awaiting file upload...</span>
+                  )}
+                </div>
+              </div>
 
-               <div>
-                  <div className="flex justify-between text-sm mb-1">
-                    <span className="text-slate-600 font-medium">Indexing Queue (Pending Facts)</span>
-                    <span className="text-slate-800 font-bold">{statusData.facts.pending_indexing} pending</span>
-                  </div>
-                  <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden border border-slate-200">
-                    <div className="bg-purple-500 h-2.5 rounded-full transition-all" style={{ width: statusData.facts.pending_indexing > 0 ? '100%' : '0%' }}></div>
-                  </div>
-               </div>
+              {/* Connector 1 */}
+              <div className="flex lg:flex-col justify-center items-center py-2 lg:py-0">
+                <ChevronRight className="text-slate-300 rotate-90 lg:rotate-0" size={24} />
+              </div>
 
-               <div>
-                  <div className="flex justify-between text-sm mb-1">
-                    <span className="text-slate-600 font-medium">Total Active Vectors</span>
-                    <span className="text-slate-800 font-bold">{statusData.vectors.active}</span>
+              {/* Step 2: Extraction */}
+              <div className={`p-4 rounded-xl border flex flex-col justify-between col-span-1 lg:col-span-1.5 transition-all ${
+                extractionStatus === 'in-progress' ? 'border-blue-500 bg-blue-50/30' :
+                extractionStatus === 'failed' ? 'border-red-300 bg-red-50/20' :
+                extractionStatus === 'completed' ? 'border-green-200 bg-green-50/10' :
+                'border-slate-200 bg-slate-50/20'
+              }`}>
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Step 2</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                      extractionStatus === 'in-progress' ? 'bg-blue-100 text-blue-800' :
+                      extractionStatus === 'failed' ? 'bg-red-100 text-red-800' :
+                      extractionStatus === 'completed' ? 'bg-green-100 text-green-800' :
+                      'bg-slate-100 text-slate-600'
+                    }`}>
+                      {extractionStatus === 'in-progress' ? 'Running' :
+                       extractionStatus === 'failed' ? 'Failed' :
+                       extractionStatus === 'completed' ? 'Completed' : 'Idle'}
+                    </span>
                   </div>
-               </div>
+                  <h3 className="font-semibold text-slate-800 text-sm mb-1 flex items-center gap-1.5">
+                    <SquareTerminal size={16} className="text-slate-500" /> LLM Fact Extraction
+                  </h3>
+                  <p className="text-xs text-slate-500">Extracts structured canonical facts from raw content.</p>
+                </div>
+                <div className="mt-4 pt-3 border-t border-slate-100 text-xs">
+                  {extractionStatus === 'in-progress' ? (
+                    <div>
+                      <div className="text-blue-600 animate-pulse font-medium">Extracting facts...</div>
+                      <div className="text-slate-500 mt-0.5">{statusData.messages.total_new} messages remaining in queue.</div>
+                    </div>
+                  ) : extractionStatus === 'failed' ? (
+                    <div>
+                      <div className="text-red-600 font-medium">Failed extractions: {statusData.messages.total_failed} messages.</div>
+                      {extractionErrorText && (
+                        <div className="mt-1 p-1.5 bg-red-50 text-red-700 border border-red-100 rounded text-[10px] break-words whitespace-pre-wrap max-h-16 overflow-y-auto font-mono">
+                          {extractionErrorText}
+                        </div>
+                      )}
+                      <button 
+                        onClick={handleResetFailed} 
+                        disabled={isResetting}
+                        className="mt-2 w-full bg-red-600 text-white py-1 px-2 rounded hover:bg-red-700 font-medium disabled:opacity-50 text-[10px]"
+                      >
+                        {isResetting ? 'Resetting...' : 'Retry Failed Extractions'}
+                      </button>
+                      {resetStatus && <div className="text-[10px] mt-1 text-slate-600">{resetStatus}</div>}
+                    </div>
+                  ) : extractionStatus === 'completed' ? (
+                    <div className="text-green-600">
+                      Successfully processed {statusData.messages.total_extracted} messages.
+                    </div>
+                  ) : (
+                    <span className="text-slate-400">Awaiting messages...</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Connector 2 */}
+              <div className="flex lg:flex-col justify-center items-center py-2 lg:py-0">
+                <ChevronRight className="text-slate-300 rotate-90 lg:rotate-0" size={24} />
+              </div>
+
+              {/* Step 3: Indexing */}
+              <div className={`p-4 rounded-xl border flex flex-col justify-between col-span-1 lg:col-span-1.5 transition-all ${
+                indexingStatus === 'in-progress' ? 'border-blue-500 bg-blue-50/30' :
+                indexingStatus === 'failed' ? 'border-red-300 bg-red-50/20' :
+                indexingStatus === 'completed' ? 'border-green-200 bg-green-50/10' :
+                'border-slate-200 bg-slate-50/20'
+              }`}>
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Step 3</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                      indexingStatus === 'in-progress' ? 'bg-blue-100 text-blue-800' :
+                      indexingStatus === 'failed' ? 'bg-red-100 text-red-800' :
+                      indexingStatus === 'completed' ? 'bg-green-100 text-green-800' :
+                      'bg-slate-100 text-slate-600'
+                    }`}>
+                      {indexingStatus === 'in-progress' ? 'Running' :
+                       indexingStatus === 'failed' ? 'Failed' :
+                       indexingStatus === 'completed' ? 'Completed' : 'Idle'}
+                    </span>
+                  </div>
+                  <h3 className="font-semibold text-slate-800 text-sm mb-1 flex items-center gap-1.5">
+                    <Database size={16} className="text-slate-500" /> Vector Indexing
+                  </h3>
+                  <p className="text-xs text-slate-500">Embeds facts and indexes them into the vector database.</p>
+                </div>
+                <div className="mt-4 pt-3 border-t border-slate-100 text-xs">
+                  {indexingStatus === 'in-progress' ? (
+                    <div>
+                      <div className="text-blue-600 animate-pulse font-medium">Embedding facts...</div>
+                      <div className="text-slate-500 mt-0.5">{statusData.facts.pending_indexing} facts remaining in queue.</div>
+                    </div>
+                  ) : indexingStatus === 'failed' ? (
+                    <div>
+                      <div className="text-red-600 font-medium">Vector indexer failed.</div>
+                      {indexingErrorText && (
+                        <div className="mt-1 p-1.5 bg-red-50 text-red-700 border border-red-100 rounded text-[10px] break-words whitespace-pre-wrap max-h-16 overflow-y-auto font-mono">
+                          {indexingErrorText}
+                        </div>
+                      )}
+                    </div>
+                  ) : indexingStatus === 'completed' ? (
+                    <div className="text-green-600 font-medium">
+                      All facts indexed ({statusData.vectors.active} active vectors).
+                    </div>
+                  ) : (
+                    <span className="text-slate-400">Awaiting facts...</span>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
 
-          <div className="bg-white border border-slate-200 shadow-sm rounded-xl p-6">
-            <h2 className="text-xl font-semibold text-slate-800 mb-4 flex items-center gap-2">
-              <BarChart2 size={20} className="text-slate-500" />
-              Recent Imports
-            </h2>
-            {statusData.history && statusData.history.length > 0 ? (
-              <div className="space-y-3">
-                {statusData.history.map((run: any, i: number) => (
-                  <div key={i} className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                    <div>
-                      <div className="text-sm font-medium text-slate-800">Batch: {run.batch_id}</div>
-                      <div className="text-xs text-slate-500">{run.date} • {run.platform}</div>
+          {/* Queue Info & Imports History */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="bg-white border border-slate-200 shadow-sm rounded-xl p-6">
+              <h2 className="text-xl font-semibold text-slate-800 mb-4 flex items-center gap-2">
+                <SquareTerminal size={20} className="text-slate-500" />
+                Pipeline Backlog Metrics
+              </h2>
+              <div className="space-y-4">
+                 <div>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-slate-600 font-medium">Extraction Queue (New Messages)</span>
+                      <span className="text-slate-800 font-bold">{statusData.messages.total_new} pending</span>
                     </div>
-                    <div className="text-right">
-                      <div className="text-sm font-bold text-blue-600">{run.messages}</div>
-                      <div className="text-xs text-slate-500">messages</div>
+                    <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden border border-slate-200">
+                      <div className="bg-blue-500 h-2.5 rounded-full transition-all" style={{ width: statusData.messages.total_new > 0 ? '100%' : '0%' }}></div>
                     </div>
-                  </div>
-                ))}
+                 </div>
+                 
+                 <div>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-slate-600 font-medium">Failed Extractions</span>
+                      <span className="text-slate-800 font-bold text-red-600">{statusData.messages.total_failed}</span>
+                    </div>
+                 </div>
+
+                 <div>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-slate-600 font-medium">Indexing Queue (Pending Facts)</span>
+                      <span className="text-slate-800 font-bold">{statusData.facts.pending_indexing} pending</span>
+                    </div>
+                    <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden border border-slate-200">
+                      <div className="bg-purple-500 h-2.5 rounded-full transition-all" style={{ width: statusData.facts.pending_indexing > 0 ? '100%' : '0%' }}></div>
+                    </div>
+                 </div>
+
+                 <div>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-slate-600 font-medium">Total Active Vectors</span>
+                      <span className="text-slate-800 font-bold text-green-600">{statusData.vectors.active}</span>
+                    </div>
+                 </div>
               </div>
-            ) : (
-              <p className="text-sm text-slate-500 text-center py-4">No recent imports found.</p>
-            )}
+            </div>
+
+            <div className="bg-white border border-slate-200 shadow-sm rounded-xl p-6">
+              <h2 className="text-xl font-semibold text-slate-800 mb-4 flex items-center gap-2">
+                <BarChart2 size={20} className="text-slate-500" />
+                Recent Imports
+              </h2>
+              {statusData.history && statusData.history.length > 0 ? (
+                <div className="space-y-3">
+                  {statusData.history.map((run: any, i: number) => (
+                    <div key={i} className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                      <div>
+                        <div className="text-sm font-medium text-slate-800">Batch: {run.batch_id}</div>
+                        <div className="text-xs text-slate-500">{run.date} • {run.platform}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-sm font-bold text-blue-600">{run.messages}</div>
+                        <div className="text-xs text-slate-500">messages</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-slate-500 text-center py-4">No recent imports found.</p>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -671,7 +943,7 @@ function UsageDashboard() {
                     <span className="font-medium text-slate-700 capitalize">{purpose.replace('_', ' ')}</span>
                     <span className="flex items-center gap-2 text-slate-600 bg-slate-100 px-3 py-1 rounded-full text-sm">
                       <Clock size={16} className="text-slate-400" />
-                      {latency} ms
+                      {String(latency)} ms
                     </span>
                   </li>
                 ))}
