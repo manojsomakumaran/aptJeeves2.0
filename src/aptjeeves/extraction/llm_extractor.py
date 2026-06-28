@@ -8,6 +8,7 @@ from typing import Any
 import langfuse.openai
 
 from langfuse.decorators import observe
+from langfuse.openai import OpenAI
 from aptjeeves.extraction.schemas import MessageForExtraction
 
 logger = logging.getLogger(__name__)

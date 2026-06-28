@@ -30,7 +30,7 @@ def test_cli_extract_pending_uses_openai_backend(tmp_path: Path, capsys, monkeyp
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("APTJEEVES_EXTRACTION_BACKEND", "openai")
 
-    with patch("openai.OpenAI") as mock_openai_cls:
+    with patch("aptjeeves.extraction.llm_extractor.OpenAI") as mock_openai_cls:
         mock_client = mock_openai_cls.return_value
         mock_client.chat.completions.create.return_value = _mock_response(
             {

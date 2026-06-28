@@ -12,10 +12,17 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 @pytest.fixture(autouse=True)
-def ensure_dotenv_loaded() -> None:
-    """Load `.env` before tests run so tests can rely on env vars.
-
-    This uses the repository's `load_dotenv` helper which is deterministic
-    and covered by unit tests.
-    """
+def ensure_dotenv_loaded(monkeypatch) -> None:
+    """Load `.env` before tests run and override keys/backends to prevent network calls."""
     load_dotenv()
+    # Disable Langfuse cloud communication
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
+    monkeypatch.setenv("LANGFUSE_HOST", "")
+    
+    # Default to local/fake components to prevent external LLM/Embedding calls
+    monkeypatch.setenv("APTJEEVES_EXTRACTION_BACKEND", "fake")
+    monkeypatch.setenv("APTJEEVES_INTENT_BACKEND", "keyword")
+    monkeypatch.setenv("APTJEEVES_EMBEDDING_MODEL", "local")
+    monkeypatch.setenv("APTJEEVES_LLM_PROVIDER", "disabled")
+

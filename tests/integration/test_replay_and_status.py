@@ -70,10 +70,11 @@ def test_replay_query_creates_new_query_run(tmp_path: Path, capsys) -> None:
     replay_output = json.loads(capsys.readouterr().out)
 
     rows = connection.execute(
-        "SELECT query_id, query_text_redacted FROM query_runs ORDER BY created_at, query_id"
+        "SELECT query_id, query_text_redacted FROM query_runs"
     ).fetchall()
     assert len(rows) == 2
-    assert rows[0]["query_id"] == first_output["query_id"]
+    query_ids = {r["query_id"] for r in rows}
+    assert query_ids == {first_output["query_id"], replay_output["query_id"]}
     assert rows[0]["query_text_redacted"] == rows[1]["query_text_redacted"]
     assert replay_output["query_id"] != first_output["query_id"]
 

@@ -6,6 +6,8 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+from langfuse import Langfuse
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -25,6 +27,18 @@ class Settings:
     langfuse_host: str | None = None
     langfuse_secret_key: str | None = None
     langfuse_public_key: str | None = None
+
+
+_langfuse_client = None
+
+
+def get_langfuse_client() -> Langfuse | None:
+    """Return a singleton Langfuse client, initializing it if needed."""
+    global _langfuse_client
+    if _langfuse_client is None:
+        if os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY"):
+            _langfuse_client = Langfuse()
+    return _langfuse_client
 
 
 def load_dotenv(env_path: Path | None = None) -> None:

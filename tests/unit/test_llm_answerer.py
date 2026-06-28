@@ -47,7 +47,7 @@ def _mock_openai_response(text: str):
 
 
 def test_llm_answerer_empty_context_returns_no_info():
-    with patch("openai.OpenAI"):
+    with patch("aptjeeves.answering.llm_answerer.OpenAI"):
         answerer = LLMAnswerer(api_key="test-key", model="gpt-4.1-mini")
     result = answerer.answer(_make_context([]), query="plumber?")
     assert result.confidence == "none"
@@ -56,7 +56,7 @@ def test_llm_answerer_empty_context_returns_no_info():
 
 
 def test_llm_answerer_calls_openai_with_query():
-    with patch("openai.OpenAI") as mock_openai_cls:
+    with patch("aptjeeves.answering.llm_answerer.OpenAI") as mock_openai_cls:
         mock_client = mock_openai_cls.return_value
         mock_client.chat.completions.create.return_value = _mock_openai_response(
             "The plumber is available at [PHONE_1]."
@@ -83,7 +83,7 @@ def test_llm_answerer_with_langfuse_trace():
     null_langfuse = MagicMock()
     null_langfuse.trace.return_value = null_trace
 
-    with patch("openai.OpenAI") as mock_openai_cls:
+    with patch("aptjeeves.answering.llm_answerer.OpenAI") as mock_openai_cls:
         mock_client = mock_openai_cls.return_value
         mock_client.chat.completions.create.return_value = _mock_openai_response("Plumber info.")
         answerer = LLMAnswerer(

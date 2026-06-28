@@ -4,6 +4,7 @@ import logging
 import shutil
 import tempfile
 import copy
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from langfuse.decorators import observe, langfuse_context
 from aptjeeves.config import load_settings, resolve_db_path, Settings
 from aptjeeves.storage.db import connect, apply_migrations
 from aptjeeves.storage.repositories import RawMessageRepository, CanonicalFactRepository, VectorEntryRepository
-from aptjeeves.cli import _build_extractor, _build_embedding_model, _build_answerer, _build_intent_classifier
+from aptjeeves.builders import build_extractor, build_embedding_model, build_answerer, build_intent_classifier
 from aptjeeves.observability.events import ObservabilityService
 from aptjeeves.extraction.service import ExtractionService
 from aptjeeves.indexing.indexer import VectorIndexingService
@@ -102,9 +103,9 @@ def ask_question(apartment: str, req: AskRequest, settings: Settings = Depends(g
         local_settings = _apply_local_settings(conn, settings)
         service = QueryService(
             conn,
-            embedding_model=_build_embedding_model(local_settings),
-            answerer=_build_answerer(local_settings),
-            intent_classifier=_build_intent_classifier(local_settings),
+            embedding_model=build_embedding_model(local_settings),
+            answerer=build_answerer(local_settings),
+            intent_classifier=build_intent_classifier(local_settings),
             top_k=req.top_k,
             max_answer_facts=req.max_facts,
         )
@@ -342,16 +343,11 @@ def get_recent_logs(apartment: str, limit: int = 100, settings: Settings = Depen
         if not table_exists:
             return {"events": []}
             
-        rows = conn.execute(
-            "SELECT timestamp, event_type, status, details FROM pipeline_events ORDER BY timestamp DESC LIMIT ?", 
+        cursor = conn.execute(
+            "SELECT created_at as timestamp, event_type, severity as status, sanitized_payload_json as details FROM pipeline_events ORDER BY created_at DESC LIMIT ?", 
             (limit,)
-        ).fetchall()
-        
-        events = []
-        for row in rows:
-            event = dict(row)
-            events.append(event)
-            
+        )
+        events = [dict(row) for row in cursor]
         return {"events": events}
     finally:
         conn.close()
@@ -366,7 +362,7 @@ def run_extraction_task(db_path: Path, settings: Settings, limit: int = 100):
     try:
         events.emit(trace_id=trace_id, event_type="background_task_started", stage="extraction", payload={"task": "run_extraction_task", "limit": limit})
         local_settings = _apply_local_settings(conn, settings)
-        extractor = _build_extractor(local_settings)
+        extractor = build_extractor(local_settings)
         service = ExtractionService(conn, extractor)
         summary = service.extract_pending(limit=limit)
         events.emit(trace_id=trace_id, event_type="background_task_completed", stage="extraction", status="success", payload={"task": "run_extraction_task", "facts_extracted": len(summary.fact_ids)})
@@ -394,7 +390,7 @@ def run_indexing_task(db_path: Path, settings: Settings, limit: int = 100):
     try:
         events.emit(trace_id=trace_id, event_type="background_task_started", stage="indexing", payload={"task": "run_indexing_task", "limit": limit})
         local_settings = _apply_local_settings(conn, settings)
-        embedding_model = _build_embedding_model(local_settings)
+        embedding_model = build_embedding_model(local_settings)
         service = VectorIndexingService(conn, embedding_model)
         summary = service.index_pending(limit=limit)
         events.emit(trace_id=trace_id, event_type="background_task_completed", stage="indexing", status="success", payload={"task": "run_indexing_task", "vectors_upserted": summary.vectors_upserted})

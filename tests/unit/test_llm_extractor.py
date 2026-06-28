@@ -53,7 +53,7 @@ def test_llm_extractor_calls_openai_with_sanitized_messages() -> None:
         ],
         "warnings": [],
     }
-    with patch("openai.OpenAI") as mock_openai_cls:
+    with patch("aptjeeves.extraction.llm_extractor.OpenAI") as mock_openai_cls:
         mock_client = mock_openai_cls.return_value
         mock_client.chat.completions.create.return_value = _mock_chat_response(payload)
 

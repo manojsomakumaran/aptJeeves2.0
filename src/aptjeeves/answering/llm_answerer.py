@@ -35,20 +35,16 @@ class LLMAnswerer:
         *,
         api_key: str,
         model: str = "gpt-4o-mini",
+        langfuse_client: Any = None,
     ) -> None:
         # Use the Langfuse-wrapped OpenAI client for automatic LLM tracing
         self._client = OpenAI(api_key=api_key)
         self._model = model
+        self._langfuse_client = langfuse_client
 
     @observe(name="ask_answerer")
     def answer(self, context: QueryContext, *, query: str = "") -> AnswerResponse:
         """Generate a grounded answer from the retrieved query context."""
-        
-        # Enrich the current trace with metadata automatically
-        langfuse_context.update_current_trace(
-            tags=[context.intent] if context.intent else [],
-            session_id=context.query_id
-        )
 
         if not context.facts:
             return AnswerResponse(
@@ -70,6 +66,23 @@ class LLMAnswerer:
             },
         ]
 
+        if self._langfuse_client:
+            trace = self._langfuse_client.trace(name="ask_answerer", query_id=context.query_id)
+            generation = trace.start_generation(
+                name="answer_generation",
+                model=self._model,
+                input=messages,
+            )
+        else:
+            generation = None
+            kwargs = {}
+            if getattr(context, "apartment", None):
+                kwargs["session_id"] = context.apartment
+            if getattr(context, "intent", None):
+                kwargs["tags"] = [context.intent]
+            if kwargs:
+                langfuse_context.update_current_trace(**kwargs)
+
         # Langfuse automatically captures tokens, latency, inputs, and outputs here!
         response = self._client.chat.completions.create(
             name="answer_generation",
@@ -80,6 +93,15 @@ class LLMAnswerer:
         )
 
         answer_text = response.choices[0].message.content.strip()
+
+        if generation:
+            generation.end(
+                output=answer_text,
+                usage={
+                    "input": response.usage.prompt_tokens,
+                    "output": response.usage.completion_tokens,
+                },
+            )
 
         citations = [
             Citation(

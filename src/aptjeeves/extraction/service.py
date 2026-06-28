@@ -1,5 +1,4 @@
-﻿﻿from __future__ import annotations
-
+﻿from __future__ import annotations
 import sqlite3
 import logging
 import math

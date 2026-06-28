@@ -70,6 +70,7 @@ def test_vector_indexing_refreshes_when_fact_version_changes(tmp_path: Path) -> 
 def test_cli_index_facts_uses_local_embedding_model(tmp_path: Path, capsys, monkeypatch) -> None:
     # Force local model by overriding APTJEEVES_EMBEDDING_MODEL to "local"
     monkeypatch.setenv("APTJEEVES_EMBEDDING_MODEL", "local")
+    monkeypatch.setenv("APTJEEVES_EXTRACTION_BACKEND", "fake")
     db_path = tmp_path / "aptjeeves.sqlite3"
     export_path = tmp_path / "chat.txt"
     export_path.write_text(
