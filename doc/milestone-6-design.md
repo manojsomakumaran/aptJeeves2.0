@@ -137,3 +137,6 @@ final answers pass through a deterministic guardrail validator
 query-status and replay-query are exposed in the CLI
 privacy leakage integration tests pass
 ```
+
+## Status Update
+Milestone 6 is fully completed. The final guardrail validator is implemented and validated with integration tests, query runs are persisted correctly, and replay commands are exposed in the CLI.

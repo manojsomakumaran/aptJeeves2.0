@@ -12,6 +12,7 @@ doc/
   detailed-design.md
 src/
   aptjeeves/
+    builders.py
     cli.py
     config.py
     answering/
@@ -151,6 +152,14 @@ python -m aptjeeves.cli ingest --apartment "Green Acres" --platform whatsapp --f
 ```
 
 This matters for dedupe: the chat/channel identity is part of `message_fingerprint`. If the same chat is imported monthly with different filenames, pass the same `--chat-name` each time.
+
+Other optional flags for `ingest`:
+
+```text
+--timezone TZ      Timezone for parsing timestamps (e.g., "UTC", "America/New_York")
+--date-order FMT   Order for ambiguous dates like 01/02/03 (DMY or MDY, default: DMY)
+--upload-dir PATH  Directory with uploaded attachments (e.g., .vcf files)
+```
 
 ## Ingest A Telegram Export
 
@@ -436,6 +445,31 @@ Example JSON output:
 
 The retrieval pipeline is fully deterministic (no LLM calls). It uses keyword-based intent classification, token-vector cosine similarity retrieval, transparent metadata reranking, and template-based answer formatting.
 
+## Observability, Tracing, and Logging
+
+AptJeeves 2.0 incorporates three main layers of observability, tracking, and logging for production readiness and offline safety.
+
+### 1. Centralized Debug Logging
+A centralized file-logging setup is configured at the root package level ([__init__.py](file:///C:/Dev/aptJeeves2.0/src/aptjeeves/__init__.py)). All CLI commands, background processes, and API server requests log detailed debug logs directly to a shared `aptjeeves_debug.log` file in the project's root folder.
+
+### 2. SQLite Pipeline Events
+For database-backed pipeline observability, AptJeeves writes structured, privacy-safe lifecycle events to the database (`pipeline_events` table). This includes tracking background tasks (e.g., `background_task_started`, `background_task_completed`, `background_task_failed`) and operations replay logs.
+
+You can view these events using the CLI `show-events` command:
+
+```powershell
+$env:PYTHONPATH = ".\src"
+python -m aptjeeves.cli show-events --apartment "Green Acres" --limit 5
+```
+
+This command prints a JSON list of recent events (with the `--limit` flag controlling the number of records shown) and is highly useful for tracing retrieval, extractions, and guardrail validations.
+
+### 3. Langfuse LLM Tracing
+If `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are provided in the environment/`.env`, AptJeeves uses the official Langfuse SDK to trace all LLM operations (such as LLM extraction, intent classification, and question answering).
+- **Wrapped Clients**: LLM components use Langfuse's wrapped OpenAI client.
+- **Decorators**: Key entry points and pipeline stages are decorated with `@observe()` to automatically log token usage, API costs, execution latency, inputs, and outputs.
+- **Offline Null Fallback**: If Langfuse keys are absent, a local `NullLangfuseClient` intercepts the tracing commands, preventing external network overhead and avoiding failures.
+
 ## Environment Variables From .env
 
 AptJeeves loads environment variables from a `.env` file in the project root. Existing environment variables are not overwritten. Copy `.env.example` to `.env` and fill in your values.
@@ -480,6 +514,7 @@ template-based answer formatting
 full ask pipeline integration
 retrieval trace persistence
 CLI ask JSON output
+offline testing safety (auto-mocking/disabling external calls to OpenAI and Langfuse)
 ```
 
 ## Useful Environment Variables
@@ -496,6 +531,10 @@ APTJEEVES_EXTRACTION_BACKEND   Extraction backend to use: fake or openai (defaul
 APTJEEVES_EXTRACTION_MODEL     Model for LLM extraction (default: gpt-4.1-mini)
 APTJEEVES_INTENT_BACKEND       Intent classification backend: keyword or openai (default: keyword)
 APTJEEVES_INTENT_MODEL         Model for LLM intent classification (default: gpt-4.1-mini)
+OPENAI_API_KEY                 API key for OpenAI services
+LANGFUSE_PUBLIC_KEY            Public key for Langfuse observability
+LANGFUSE_SECRET_KEY            Secret key for Langfuse observability
+LANGFUSE_HOST                  Host for Langfuse observability (e.g., https://cloud.langfuse.com)
 ```
 
 Defaults:
@@ -523,9 +562,45 @@ doc/architecture.md
 doc/detailed-design.md
 ```
 
+## Web Interface (UI & FastAPI Backend)
+
+AptJeeves 2.0 includes a local FastAPI backend and a Vite-based React Single Page Application (SPA) frontend.
+
+### 1. Launch the Backend Server
+Run the FastAPI application from the project root:
+```powershell
+$env:PYTHONPATH = ".\src"
+python -m uvicorn aptjeeves.api.server:app --host 127.0.0.1 --port 8000
+```
+This runs the backend at `http://127.0.0.1:8000` with the following endpoints:
+- `POST /api/{apartment}/ask` — Submit questions to the LLM or template answering pipeline.
+- `GET /api/apartments` — List all available apartment databases.
+- `GET /api/{apartment}/status` — Fetch ingestion, extraction, and vector metrics.
+- `GET /api/{apartment}/settings` & `POST /api/{apartment}/settings` — Manage configuration preferences.
+- `POST /api/{apartment}/reset-failed` — Re-queue failed extractions.
+- `POST /api/{apartment}/upload` — Process multi-file WhatsApp/Telegram log uploads and queue background processing.
+- `GET /api/{apartment}/observability` — Monitor API token usage, costs, and latencies.
+- `GET /api/{apartment}/logs` — Retrieve DB pipeline events.
+
+### 2. Launch the React Frontend
+Navigate to the `frontend` folder and run the dev server:
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+Open `http://localhost:5173/` in your browser.
+
+### 3. UI Features
+- **Interactive Chat Interface**: Chat with the AptJeeves assistant, explore citations, inspect confidence ratings, and view privacy warnings.
+- **Folder Ingestion & Pipeline Status**: Upload raw logs directly, trigger pipelines, and watch progress bars update in real-time.
+- **Observability Dashboard**: Track LLM usage costs and latency per operation.
+- **System Statistics**: Monitor total active vectors, extracted facts, and pending items.
+- **Advanced Configuration**: Edit settings (like embedding and extraction models) per apartment, or reset failed extraction messages to requeue them safely without waste.
+
 ## Current Scope
 
-All core milestones (1 through 7) are now fully implemented:
+All core milestones (1 through 8) are now fully implemented:
 
 ```text
 SQLite schema and migration runner
@@ -551,4 +626,10 @@ query runs, retrieval traces, and guardrail events persistence
 final privacy guardrail validators (verifies phone, email, unit, and fact privacy statuses)
 replay commands for import batches, facts, and queries
 CLI ask, query-status, and replay commands with JSON output
+FastAPI backend server endpoints and asynchronous tasks
+React frontend SPA with chat interface, ingestion, usage, and logs views
+centralized component builder factory pattern (builders.py)
+Langfuse cloud tracing integration for LLM calls with offline fallback
+centralized debug file logging (aptjeeves_debug.log)
+extended pipeline events with status mapping and background task tracking
 ```

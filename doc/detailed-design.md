@@ -1,125 +1,116 @@
-# AptJeeves 2.0 Detailed Design
+# AptJeeves 2.0 Comprehensive Detailed Design
 
-This document expands the high-level architecture into implementation-ready design for AptJeeves 2.0.
+This document is the consolidated detailed design and implementation manual for AptJeeves 2.0. It merges all core pipeline stage specifications, database schemas, CLI commands, FastAPI backend endpoints, and Vite-based React SPA frontend components into a single comprehensive source of truth.
 
-AptJeeves 2.0 is a clean-slate LLM-based project. The rule-based/non-LLM implementation remains separate in AptJeeves 1.0 and is not part of this codebase or design.
+AptJeeves 2.0 is a local-first, privacy-aware community knowledge assistant that can ingest exported apartment chats and answer resident queries using grounded, cited, and privacy-safe facts.
 
-## 1. Goals
+---
 
-Build a local-first, privacy-aware community knowledge assistant that can ingest exported apartment community chats and answer resident questions using grounded, cited, privacy-safe information.
+## 1. System Goals & Scope
 
-Primary goals:
+### Primary Goals
+- **Idempotency**: Ingest repeated monthly chat exports safely, skipping previously imported messages using stable fingerprints.
+- **Privacy Redaction**: Redact PII (phone numbers, emails, flat numbers, URLs) deterministically before passing data to models or persistent storage.
+- **Canonical Fact Store**: Store extracted structured facts in a local SQLite database as the source of truth, rather than relying on a vector database as the truth ledger.
+- **Local Semantic Index**: Index facts using semantic vector embeddings (OpenAI `text-embedding-3-small` or local token embeddings) for quick retrieval.
+- **Grounded Answering**: Generate resident answers purely from retrieved canonical context using low-temperature models (`gpt-4.1-mini`), preventing hallucinations.
+- **Observability**: Expose detailed tracing for debugging, cost tracking, and safety auditing, integrated with Langfuse.
+- **Replayability**: Rerun extraction, indexing, and queries using stored, sanitized inputs.
+- **Web Dashboard**: Provide a responsive React web interface to chat, upload logs, manage settings, and inspect system logs.
 
-```text
-ingest repeated monthly chat exports safely
-dedupe old messages using stable message fingerprints
-extract structured facts with LLM assistance (gpt-4-mini)
-store canonical facts in SQLite as the source of truth
-index sanitized facts for semantic retrieval (text-embedding-3-small)
-answer only from retrieved approved context (gpt-4-mini, temp=0.1)
-prevent resident PII leakage
-make every important decision observable and replayable (Langfuse integration)
-```
+### Scope & Non-Goals
+- No migration path or dependencies on AptJeeves 1.0.
+- No role-based access control (RBAC) or user permissions in Phase 1.
+- No autonomous agent multi-tool loops; retrieval and answering follow a strict, deterministic sequence.
+- No processing of raw media (images, voice notes, PDFs).
+- No official legal verification of government/administrative guidelines (results are labeled as "community-discussed").
 
-Non-goals for the first implementation:
+---
 
-```text
-no migration from AptJeeves 1.0
-no RBAC or multi-user permission model
-no autonomous agent framework
-no cloud-hosted database requirement
-no raw media processing
-no official verification of government/legal information
-```
+## 2. Directory Layout & Component Architecture
 
-## 2. System Shape
-
-The application should be built as deterministic orchestration around a few explicit components:
-
-```text
-ChatIngestionService
-MessageParser
-MessageNormalizer
-PrivacyRedactor
-MessageDeduper
-LLMExtractor
-CanonicalFactStore
-VectorIndexer
-QueryIntentClassifier
-Retriever
-Reranker
-ContextBuilder
-LLMAnswerer
-GuardrailValidator
-ObservabilityService
-ReplayService
-```
-
-Recommended source layout:
+The codebase separates ingestion, privacy, extraction, storage, indexing, retrieval, answering, observability, and the API backend:
 
 ```text
 src/
   aptjeeves/
-    __init__.py
-    app.py
-    config.py
-    cli.py
-    ingestion/
-      parsers.py
-      normalizer.py
-      fingerprint.py
-      service.py
-    privacy/
-      detectors.py
-      redactor.py
-      classifier.py
-      guardrails.py
-    extraction/
-      schemas.py
-      prompts.py
-      llm_extractor.py
-      validator.py
-    storage/
-      db.py
-      migrations/
-      repositories.py
-    indexing/
-      embeddings.py
-      openai_embeddings.py
-      vector_store.py
-      indexer.py
-    retrieval/
-      intent.py
-      retriever.py
-      reranker.py
-      context.py
+    __init__.py           # Application initialization & centralized debug logging
+    builders.py           # Centralized factory for LLM, embedding, and intent backends
+    cli.py                # Command Line Interface (CLI) entrypoint
+    config.py             # Configuration loader (.env loading and settings schemas)
     answering/
-      prompts.py
-      llm_answerer.py
-      formatter.py
+      formatter.py        # Fallback template-based answer formatter
+      guardrails.py       # Final generated answer validator (PII & citation filter)
+      llm_answerer.py     # OpenAI-backed grounded question answerer
+    api/
+      server.py           # FastAPI backend server with async background tasks
+    extraction/
+      fake_extractor.py   # Deterministic extractor used for offline testing
+      llm_extractor.py    # OpenAI-backed fact extractor
+      schemas.py          # Typed schemas for message inputs and fact candidates
+      service.py          # Fact extraction queue processor
+      validator.py        # Fact verification rules
+    indexing/
+      embeddings.py       # Local token embedding generator
+      indexer.py          # Vector indexing queue orchestrator
+      openai_embeddings.py# OpenAI-backed embedding model wrapper
+      text_builder.py     # Embedding text representation builder
+    ingestion/
+      fingerprint.py      # Unique message fingerprint calculator
+      hashing.py          # SHA256 hashing helpers
+      normalizer.py       # Whitespace, timezone, and timestamp normalization
+      parsers.py          # WhatsApp text parser and Telegram JSON parser
+      service.py          # Ingestion ledger controller
+      vcard.py            # VCF/vCard attachment parser helper
     observability/
-      events.py
-      langfuse_client.py
-      traces.py
-      replay.py
+      events.py           # SQLite database event logging service
+      langfuse_client.py  # Langfuse singleton and Null wrapper for offline mode
+      replay.py           # Operational replay engine
+    privacy/
+      detectors.py        # Regex-based PII scanners (phone, email, flats, URLs)
+      redactor.py         # PII placeholder injector
+    retrieval/
+      context.py          # Query context constructor with privacy filtering
+      intent.py           # Intent classifiers (OpenAI-backed and keyword-based)
+      reranker.py         # Transparent metadata-based reranker formula
+      retriever.py        # Cosine similarity retriever against active vectors
+      service.py          # Cosine similarity retriever and reranker orchestrator
+      traces.py           # Retrieval trace logger
+    storage/
+      db.py               # SQLite connection setup and migrations runner
+      migrations/         # Raw SQL database migrations (001_initial.sql to 005_query_runs.sql)
+      models.py           # Typed database dataclasses and schemas
+      repositories.py     # SQLite repositories mapping tables to application models
 tests/
-  unit/
-  integration/
+  unit/                   # Parsers, normalizers, PII redaction, and intent tests
+  integration/            # Idempotent imports, vector indexing, query RAG, and CLI tests
 doc/
-  architecture.md
-  detailed-design.md
+  architecture.md         # High-level architecture and logic flows
+  detailed-design.md      # Unified system design (This Document)
+  ui-implementation-plan.md # React SPA implementation phases
 ```
 
-## 3. Data Model
+---
 
-SQLite is the canonical source of truth. The vector store is only a retrieval index.
+## 3. Local SQLite Schema (Canonical Data Model)
 
-Use UUID-style string IDs for application objects and SHA-256 hex strings for stable hashes/fingerprints.
+SQLite serves as the single source of truth. The vector index points back to DB fact IDs. All date-times are stored in UTC ISO 8601 strings with second precision (`YYYY-MM-DDTHH:MM:SSZ`).
 
-### 3.1 Import Runs
+```mermaid
+erDiagram
+    import_runs ||--o{ raw_messages : contains
+    raw_messages ||--o{ fact_evidence : references
+    canonical_facts ||--o{ fact_evidence : backed_by
+    canonical_facts ||--|| service_contacts : is_a
+    canonical_facts ||--|| process_info : is_a
+    canonical_facts ||--|| facility_info : is_a
+    canonical_facts ||--o{ vector_entries : indexed_as
+    query_runs ||--o{ retrieval_traces : spawns
+    query_runs ||--o{ guardrail_events : logs
+```
 
-Tracks every ingestion attempt.
-
+### 3.1 `import_runs`
+Tracks all batch ingestion events.
 ```sql
 CREATE TABLE import_runs (
   import_batch_id TEXT PRIMARY KEY,
@@ -129,7 +120,7 @@ CREATE TABLE import_runs (
   chat_name TEXT,
   started_at TEXT NOT NULL,
   completed_at TEXT,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL,          -- running, completed, completed_with_errors, failed
   parser_version TEXT NOT NULL,
   normalizer_version TEXT NOT NULL,
   redactor_version TEXT NOT NULL,
@@ -142,20 +133,8 @@ CREATE TABLE import_runs (
 );
 ```
 
-Status values:
-
-```text
-running
-completed
-completed_with_errors
-failed
-cancelled
-```
-
-### 3.2 Raw Messages
-
-Stores one row per unique message. This table is the idempotency ledger.
-
+### 3.2 `raw_messages`
+The message ledger. `message_fingerprint` enforces strict database-level deduplication.
 ```sql
 CREATE TABLE raw_messages (
   message_id TEXT PRIMARY KEY,
@@ -170,13 +149,13 @@ CREATE TABLE raw_messages (
   sent_at_utc TEXT NOT NULL,
   source_timezone TEXT,
   normalized_text_hash TEXT NOT NULL,
-  sanitized_text TEXT NOT NULL,
+  sanitized_text TEXT NOT NULL,      -- Unredacted text is never written here
   raw_text_debug_ref TEXT,
   source_file TEXT NOT NULL,
   source_offset INTEGER,
   source_line_start INTEGER,
   source_line_end INTEGER,
-  processing_status TEXT NOT NULL,
+  processing_status TEXT NOT NULL,   -- new, redacted, extracted, no_extractable_info, failed
   first_seen_at TEXT NOT NULL,
   processed_at TEXT,
   parser_version TEXT NOT NULL,
@@ -184,40 +163,21 @@ CREATE TABLE raw_messages (
   redactor_version TEXT NOT NULL,
   FOREIGN KEY (import_batch_id) REFERENCES import_runs(import_batch_id)
 );
-
-CREATE INDEX idx_raw_messages_import_batch
-  ON raw_messages(import_batch_id);
-
-CREATE INDEX idx_raw_messages_sent_at
-  ON raw_messages(sent_at_utc);
+CREATE INDEX idx_raw_messages_import_batch ON raw_messages(import_batch_id);
+CREATE INDEX idx_raw_messages_sent_at ON raw_messages(sent_at_utc);
 ```
 
-Processing status values:
-
-```text
-new
-redacted
-extracted
-no_extractable_info
-failed
-quarantined
-```
-
-`raw_text_debug_ref` must be null by default. If a debug/quarantine mode is ever enabled, it should point to restricted local storage, not contain raw text directly.
-
-### 3.3 Canonical Facts
-
-Generic fact table shared by all fact types.
-
+### 3.3 `canonical_facts`
+The polymorphic fact base table.
 ```sql
 CREATE TABLE canonical_facts (
   fact_id TEXT PRIMARY KEY,
-  fact_type TEXT NOT NULL,
+  fact_type TEXT NOT NULL,           -- service_contact, process_info, facility_info
   fact_identity_key TEXT NOT NULL UNIQUE,
   title TEXT NOT NULL,
   summary TEXT NOT NULL,
-  privacy_status TEXT NOT NULL,
-  confidence REAL NOT NULL,
+  privacy_status TEXT NOT NULL,      -- public_to_residents, restricted_resident_pii, restricted_unknown_contact, restricted_sensitive, needs_review
+  confidence REAL NOT NULL,          -- 0.0 to 1.0
   source_count INTEGER NOT NULL DEFAULT 0,
   first_seen TEXT NOT NULL,
   latest_seen TEXT NOT NULL,
@@ -228,53 +188,21 @@ CREATE TABLE canonical_facts (
   llm_model_version TEXT,
   merge_status TEXT NOT NULL DEFAULT 'active'
 );
-
-CREATE INDEX idx_canonical_facts_type
-  ON canonical_facts(fact_type);
-
-CREATE INDEX idx_canonical_facts_latest_seen
-  ON canonical_facts(latest_seen);
+CREATE INDEX idx_canonical_facts_type ON canonical_facts(fact_type);
+CREATE INDEX idx_canonical_facts_latest_seen ON canonical_facts(latest_seen);
 ```
 
-Fact types:
-
-```text
-service_contact
-process_info
-facility_info
-policy_or_rule
-alert_or_issue
-```
-
-Phase 1 fact types:
-
-```text
-service_contact
-process_info
-facility_info
-```
-
-Privacy status values:
-
-```text
-public_to_residents
-restricted_resident_pii
-restricted_unknown_contact
-restricted_sensitive
-needs_review
-```
-
-### 3.4 Service Contacts
-
+### 3.4 `service_contacts`
+Subtype details for service contacts (e.g., plumbers, carpenters).
 ```sql
 CREATE TABLE service_contacts (
   fact_id TEXT PRIMARY KEY,
   service_type TEXT NOT NULL,
   display_name TEXT,
   normalized_name TEXT,
-  contact_methods_json TEXT NOT NULL,
-  contact_method_hashes_json TEXT NOT NULL,
-  contact_classification TEXT NOT NULL,
+  contact_methods_json TEXT NOT NULL,       -- Stored with phone/email placeholders (e.g. PHONE_1)
+  contact_method_hashes_json TEXT NOT NULL, -- SHA256 hashes of original contact methods
+  contact_classification TEXT NOT NULL,     -- vendor_or_service_contact, resident_contact, resident_affiliated_service_contact, unknown_contact
   is_resident_affiliated INTEGER NOT NULL DEFAULT 0,
   resident_affiliation_reason TEXT,
   area_or_scope TEXT,
@@ -285,30 +213,18 @@ CREATE TABLE service_contacts (
 );
 ```
 
-Contact classification values:
-
-```text
-vendor_or_service_contact
-resident_contact
-resident_affiliated_service_contact
-apartment_staff_contact
-unknown_contact
-```
-
-`contact_methods_json` may contain phone/email/URL placeholders or approved service contact values. Resident phone numbers must not be returned.
-
-### 3.5 Process Info
-
+### 3.5 `process_info`
+Subtype details for administrative/community procedures (e.g., Voter registration).
 ```sql
 CREATE TABLE process_info (
   fact_id TEXT PRIMARY KEY,
   process_name TEXT NOT NULL,
   category TEXT,
   provider_or_authority TEXT,
-  steps_json TEXT,
-  required_documents_json TEXT,
-  fees_json TEXT,
-  locations_or_portals_json TEXT,
+  steps_json TEXT,                          -- JSON array of step strings
+  required_documents_json TEXT,             -- JSON array of document titles
+  fees_json TEXT,                           -- Fees and charges
+  locations_or_portals_json TEXT,           -- URLs or physical office addresses
   deadlines_json TEXT,
   caveats TEXT,
   staleness_risk TEXT NOT NULL DEFAULT 'medium',
@@ -317,8 +233,8 @@ CREATE TABLE process_info (
 );
 ```
 
-### 3.6 Facility Info
-
+### 3.6 `facility_info`
+Subtype details for apartment amenities.
 ```sql
 CREATE TABLE facility_info (
   fact_id TEXT PRIMARY KEY,
@@ -332,10 +248,8 @@ CREATE TABLE facility_info (
 );
 ```
 
-### 3.7 Fact Evidence
-
-Links canonical facts to source messages.
-
+### 3.7 `fact_evidence`
+Links canonical facts to source raw messages for citations and calculations.
 ```sql
 CREATE TABLE fact_evidence (
   evidence_id TEXT PRIMARY KEY,
@@ -343,32 +257,19 @@ CREATE TABLE fact_evidence (
   message_id TEXT NOT NULL,
   message_fingerprint TEXT NOT NULL,
   sanitized_snippet TEXT NOT NULL,
-  evidence_type TEXT NOT NULL,
+  evidence_type TEXT NOT NULL,               -- mention, recommendation, correction, price_hint
   confidence REAL NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY (fact_id) REFERENCES canonical_facts(fact_id),
   FOREIGN KEY (message_id) REFERENCES raw_messages(message_id),
   UNIQUE (fact_id, message_id, evidence_type)
 );
-
-CREATE INDEX idx_fact_evidence_fact_id
-  ON fact_evidence(fact_id);
+CREATE INDEX idx_fact_evidence_fact_id ON fact_evidence(fact_id);
+CREATE INDEX idx_fact_evidence_message_id ON fact_evidence(message_id);
 ```
 
-Evidence types:
-
-```text
-mention
-recommendation
-correction
-confirmation
-negative_feedback
-price_hint
-availability_hint
-```
-
-### 3.8 Vector Entries
-
+### 3.8 `vector_entries`
+Stores fact embeddings for retrieval.
 ```sql
 CREATE TABLE vector_entries (
   vector_id TEXT PRIMARY KEY,
@@ -378,35 +279,87 @@ CREATE TABLE vector_entries (
   embedding_text TEXT NOT NULL,
   embedding_hash TEXT NOT NULL,
   embedding_model_version TEXT NOT NULL,
+  embedding_json TEXT NOT NULL,             -- JSON representation of float list
   vector_store_ref TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL,                     -- active, stale, failed, deleted
   FOREIGN KEY (fact_id) REFERENCES canonical_facts(fact_id)
 );
-
-CREATE INDEX idx_vector_entries_fact_id
-  ON vector_entries(fact_id);
+CREATE UNIQUE INDEX idx_vector_entries_fact_id_active ON vector_entries(fact_id, embedding_model_version) WHERE status = 'active';
+CREATE INDEX idx_vector_entries_fact_id ON vector_entries(fact_id);
+CREATE INDEX idx_vector_entries_status ON vector_entries(status);
 ```
 
-Status values:
-
-```text
-active
-stale
-failed
-deleted
+### 3.9 `query_runs`
+Logs user requests and RAG execution statuses. Redacted query text is stored; raw query is discarded.
+```sql
+CREATE TABLE query_runs (
+  query_id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL,
+  status TEXT NOT NULL,                     -- running, completed, blocked, failed
+  query_text_redacted TEXT NOT NULL,
+  query_text_hash TEXT NOT NULL,
+  query_intent TEXT,
+  answerer_version TEXT,
+  guardrail_version TEXT,
+  retrieval_trace_id TEXT,
+  final_action TEXT,                        -- pass, redact, refuse_safely, failed
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX idx_query_runs_trace_id ON query_runs(trace_id);
+CREATE INDEX idx_query_runs_status ON query_runs(status);
 ```
 
-### 3.9 Observability Tables
+### 3.10 `retrieval_traces`
+Auditing record for context retrieval parameters.
+```sql
+CREATE TABLE retrieval_traces (
+  retrieval_trace_id TEXT PRIMARY KEY,
+  query_id TEXT NOT NULL,
+  trace_id TEXT NOT NULL,
+  query_text_hash TEXT,
+  query_intent TEXT,
+  query_embedding_hash TEXT,
+  candidate_fact_ids_json TEXT NOT NULL,     -- Ranked list of all matched facts
+  selected_fact_ids_json TEXT NOT NULL,      -- Facts selected for the prompt context
+  removed_by_privacy_json TEXT,              -- Facts filtered out due to privacy checks
+  rerank_scores_json TEXT,                   -- Detailed scores for inspection
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_retrieval_traces_query_id ON retrieval_traces(query_id);
+CREATE INDEX idx_retrieval_traces_trace_id ON retrieval_traces(trace_id);
+```
 
+### 3.11 `guardrail_events`
+Audit ledger for guardrail triggers on generated answers.
+```sql
+CREATE TABLE guardrail_events (
+  guardrail_event_id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL,
+  query_id TEXT,
+  fact_id TEXT,
+  guardrail_name TEXT NOT NULL,
+  action TEXT NOT NULL,                      -- pass, redact, refuse_safely
+  reason TEXT NOT NULL,
+  sanitized_payload_json TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_guardrail_events_trace_id ON guardrail_events(trace_id);
+CREATE INDEX idx_guardrail_events_query_id ON guardrail_events(query_id);
+```
+
+### 3.12 `pipeline_events`
+Centralized application trace logging.
 ```sql
 CREATE TABLE pipeline_events (
   event_id TEXT PRIMARY KEY,
   trace_id TEXT NOT NULL,
   event_type TEXT NOT NULL,
-  stage TEXT NOT NULL,
-  severity TEXT NOT NULL,
+  stage TEXT NOT NULL,                       -- ingestion, extraction, indexing, retrieval, guardrails, replay
+  severity TEXT NOT NULL,                    -- info, warning, error, success, started
   import_batch_id TEXT,
   message_id TEXT,
   fact_id TEXT,
@@ -414,998 +367,316 @@ CREATE TABLE pipeline_events (
   sanitized_payload_json TEXT,
   created_at TEXT NOT NULL
 );
-
-CREATE INDEX idx_pipeline_events_trace
-  ON pipeline_events(trace_id);
-
-CREATE TABLE llm_calls (
-  llm_call_id TEXT PRIMARY KEY,
-  trace_id TEXT NOT NULL,
-  purpose TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  model TEXT NOT NULL,
-  prompt_version TEXT NOT NULL,
-  input_hash TEXT NOT NULL,
-  sanitized_input_snapshot TEXT,
-  sanitized_output_snapshot TEXT,
-  output_json_valid INTEGER,
-  latency_ms INTEGER,
-  input_tokens INTEGER,
-  output_tokens INTEGER,
-  estimated_cost TEXT,
-  error_code TEXT,
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE retrieval_traces (
-  retrieval_trace_id TEXT PRIMARY KEY,
-  query_id TEXT NOT NULL,
-  trace_id TEXT NOT NULL,
-  query_intent TEXT,
-  query_embedding_hash TEXT,
-  candidate_fact_ids_json TEXT NOT NULL,
-  selected_fact_ids_json TEXT NOT NULL,
-  removed_by_privacy_json TEXT,
-  rerank_scores_json TEXT,
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE guardrail_events (
-  guardrail_event_id TEXT PRIMARY KEY,
-  trace_id TEXT NOT NULL,
-  query_id TEXT,
-  fact_id TEXT,
-  guardrail_name TEXT NOT NULL,
-  action TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  sanitized_payload_json TEXT,
-  created_at TEXT NOT NULL
-);
+CREATE INDEX idx_pipeline_events_trace ON pipeline_events(trace_id);
+CREATE INDEX idx_pipeline_events_import_batch ON pipeline_events(import_batch_id);
 ```
 
-## 4. Ingestion Design
+> [!NOTE]
+> There is no SQLite table for `llm_calls`. Individual LLM API token counts, latencies, and costs are tracked using **Langfuse Tracing**, avoiding duplicate logging overhead and keeping SQLite local files light.
 
-### 4.1 CLI Contract
+---
 
-Initial interface:
+## 4. Pipeline Stages & Service Designs
 
-```text
-aptjeeves ingest --apartment "Green Acres" --platform whatsapp --file "WhatsApp Chat with Apartment Main.txt"
-aptjeeves ingest --apartment "Green Acres" --platform telegram --file "Telegram Chat with Apartment Main.json"
-aptjeeves import-status --apartment "Green Acres" --batch IMPORT_BATCH_ID
-aptjeeves replay-import --batch IMPORT_BATCH_ID --from-stage extraction
+### 4.1 Ingestion & Normalization
+The `ChatIngestionService` handles chat parsing:
+- **WhatsApp Parser**: Scans text lines matching standard timestamps, e.g., `dd/mm/yy, hh:mm - Sender: MessageText`. Supports multiline logs.
+- **Telegram Parser**: Parses Telegram exported JSON structure (`messages` array, extracts `id`, `from`, `date`, `text`).
+- **Normalizer**: Collapses redundant spaces, strips non-printable characters, and converts timestamps to UTC ISO format based on the configured default timezone (e.g. `Asia/Kolkata`).
+- **Deduplication**: Computes a SHA-256 fingerprint:
+  - If the platform has a stable native message ID, the fingerprint is computed as:
+    $$\text{fingerprint} = \text{SHA256}(\text{platform} \parallel \text{conversation\_id} \parallel \text{source\_message\_id})$$
+  - Otherwise, it falls back to the content hash formula:
+    $$\text{fingerprint} = \text{SHA256}(\text{platform} \parallel \text{conversation\_id} \parallel \text{sender} \parallel \text{sent\_at\_utc} \parallel \text{text\_hash})$$
+  Inserts matching fingerprints are skipped deterministically using SQLite `INSERT OR IGNORE`.
+- **Deduplication CLI Output**: Returns counts for seen, inserted, and skipped messages.
+
+### 4.2 Privacy & Redaction
+The `PrivacyRedactor` implements regex and dictionary matches before data goes to model APIs or SQLite:
+1. **Indian Phone Numbers**: Matches 10-digit formats, +91 prefixes, spaces/dashes. Pattern: `(?<!\w)(?:\+?91[\s-]?)?(?:0[\s-]?)?(?:[6-9]\d{4}[\s-]\d{5}|[6-9]\d{2}[\s-]?\d{3}[\s-]?\d{4}|[6-9]\d{9})(?!\w)`
+2. **Emails**: Matches standard RFC 5322 regex. Pattern: `(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])`
+3. **URLs**: Matches standard web URLs. Pattern: `\b(?:https?://|www\.)[^\s<>()]+`
+4. **Flat Numbers**: Identifies block prefixes followed by digits (e.g., A-101, B-402, Block C 204). Pattern: `(?ix)(?<!\w)((?:flat|apt|apartment|unit)\s*[A-Z]?\s*[-/]?\s*\d{2,4}[A-Z]?|[A-Z]\s*[-/]\s*\d{3,4}[A-Z]?)(?!\w)`
+5. **Addresses**: Identifies block/building/tower indicators. Pattern: `\b(?:tower|block|building)\s+[A-Z0-9]{1,4}\b`
+6. **Contacts**: Matches capitalized name-like word (3-20 letters) immediately following contact trigger words (`contact`, `call`, `ask`, `reach` etc.), excluding common stopwords (`for`, `the`, `our`, `him`, `her` etc.). Pattern: `(?i)(?:contact|call|ask|ping|reach|message|text)\s+([A-Za-z]{3,20})(?!\w)`
+
+All matches are replaced with counters: `PHONE_1`, `EMAIL_1`, `FLAT_1`, `URL_1`, `ADDRESS_1`, `CONTACT_1`.
+- **Hashed Senders**: Senders are stored as `SHA256(sender_name)` to prevent real-name leakage.
+- **Contact Classification**: During extraction, entities are classified:
+  - `vendor_or_service_contact` (plumbers, carpenters; public access allowed).
+  - `resident_contact` (flat owners, tenants; restricted access).
+  - `resident_affiliated_service_contact` (restricted by default unless explicitly classified as public service).
+
+### 4.3 LLM Fact Extraction
+`ExtractionService` groups newly inserted sanitized messages and calls the extractor:
+- **Fake Extractor**: Converts mock prompts to fixed mock JSON outputs. Ideal for offline integration testing.
+- **OpenAI LLM Extractor**: Invokes `gpt-4.1-mini` with a structured system prompt, forcing a JSON response that complies with the schema (identifies facts, subtype details, evidence snippets, confidence scores).
+- **Fact Merging**:
+  Calculates a unique `fact_identity_key`:
+  - **Service Contacts**: `SHA256(service_type || normalized_name || hashed_contact_method)`
+  - **Process Info**: `SHA256(process_name || provider_or_authority)`
+  - **Facility Info**: `SHA256(facility_name || info_type)`
+  If the key already exists in SQLite, the `CanonicalFactRepository` merges the facts:
+  - Appends new fact evidence rows.
+  - Updates the `latest_seen` date.
+  - Increments `source_count`.
+  - Re-evaluates description summary and increases `fact_version` if text content changes.
+
+### 4.4 Vector Indexing
+`VectorIndexingService` monitors fact updates:
+- When a fact is modified and its `fact_version` increases, the active vector entry is marked `stale`.
+- **Embedding Text construction**: Builds text context:
+  - **Service Contacts**:
+    `Fact type: service_contact\nService type: {service_type}\nName: {display_name}\nSummary: {summary}\nArea/scope: {area_or_scope}\nEvidence: {source_count} mentions, latest {latest_seen}\nCaveats: {caveats}`
+  - **Process Info**:
+    `Fact type: process_info\nProcess: {process_name}\nAuthority/provider: {provider_or_authority}\nSummary: {summary}\nSteps: {steps}\nDocuments: {required_documents}\nCaveats: {caveats}`
+  - **Facility Info**:
+    `Fact type: facility_info\nFacility: {facility_name}\nInfo type: {info_type}\nLocation: {location_hint}\nAvailability: {availability}\nRules/steps: {rules_or_steps}\nCaveats: {caveats}`
+- **Embedding Models**:
+  - **Local Token Embeddings**: Generates a fast token bag cosine-compatible vector representation (useful for local development).
+  - **OpenAI Embeddings**: Calls `text-embedding-3-small` (1536-dimensions).
+- Stale vector entries are updated and marked `active`.
+
+### 4.5 Query, Intent, & Retrieval
+`QueryService` processes RAG requests:
+1. **Query Redaction**: Redacts the user query, creating a query run entry.
+2. **Intent Classification**: Classifies queries into 6 categories:
+   - `find_service_contact`
+   - `ask_process_steps`
+   - `ask_facility_info`
+   - `ask_policy_or_rule`
+   - `ask_alert_or_issue`
+   - `general_or_unknown`
+   Done via Keyword search or `gpt-4.1-mini`.
+3. **Retrieval**: Embeds query, queries `vector_entries` with Cosine Similarity:
+   $$\text{Similarity}(A, B) = \frac{A \cdot B}{\|A\| \|B\|}$$
+4. **Metadata Reranking**: Re-scores facts:
+   $$\text{Final Score} = \text{Similarity} \times 0.45 + \text{Source Boost} \times 0.15 + \text{Recency Decay} \times 0.15 + \text{Confidence} \times 0.15 + \text{Intent Match} \times 0.10$$
+5. **Privacy Filtering**: Drops facts if they are marked `restricted` or if a service contact's status is `needs_review`.
+
+### 4.6 Answer Generation & Formatter
+- **Template Formatter**: Formats the selected facts into structured templates with citations (no LLM calls, deterministic fallback).
+- **LLM Answerer**: Sends query and approved context to `gpt-4.1-mini` with a temperature of `0.1`. System prompt instructs:
+  - Answer only using provided context.
+  - State "I don't know" if facts are absent.
+  - Append citations mentioning citation number, source count, and last seen date.
+  - Present legal/process facts as "community-discussed".
+
+### 4.7 Guardrails & Safety Fallbacks
+The `GuardrailValidator` intercepts final outputs before returning them to the user:
+- **Phone & Email Scanners**: Re-scans generated answers. If a real phone number or email is leaked (rather than a placeholder like `PHONE_1`), the guardrail blocks the output.
+- **Unsanitized Snippets & Address Leakage**: Verifies that no unredacted unit/flat information has leaked.
+- **Veto Rules**: If any check fails, it triggers the safety fallback:
+  > *"I found related discussion, but the contact or details appear restricted or unverified, so I cannot share them. I can share the general service/process information from the discussion."*
+- Logs decisions to the `guardrail_events` table.
+
+### 4.8 Observability & Replay
+- **Events Logging**: Writes JSON-formatted logs to `pipeline_events`.
+- **Operations Replay**:
+  - `replay-import`: Reruns extraction and vector indexing for an existing import batch without re-ingesting raw source files.
+  - `replay-fact-index`: Reruns vector indexing for a single canonical fact.
+  - `replay-query`: Replays a query from its stored redacted text, generating a new query run.
+- **Langfuse Cloud Tracing**: `@observe()` decorators instrument key endpoints and functions. Absent API keys fall back gracefully to a mock `NullLangfuseClient` without performance hits.
+
+---
+
+## 5. CLI Command Reference
+
+All CLI commands accept the global options:
+- `--db PATH`: SQLite database file path override.
+- `--apartment NAME`: Apartment chatbot selector slug, selecting the database file path `data_dir/apartments/<apartment_slug>/aptjeeves.sqlite3`.
+
+### 5.1 `ingest`
+Parses and normalizes WhatsApp/Telegram chat logs:
+```powershell
+python -m aptjeeves.cli ingest --platform [whatsapp|telegram] --file PATH [options]
+```
+Options:
+- `--chat-name NAME`: Stable chat/channel name.
+- `--timezone TZ`: Chat log timezone for parsing timestamps.
+- `--date-order FMT`: Handing ambiguous dates (DMY or MDY, default: DMY).
+- `--upload-dir PATH`: Directory containing uploaded attachments.
+
+### 5.2 `import-status`
+Shows a summary of a past ingestion batch:
+```powershell
+python -m aptjeeves.cli import-status --batch BATCH_ID
 ```
 
-For multi-apartment chatbot support, each apartment should use an isolated local database:
-
-```text
-data/apartments/<apartment_slug>/aptjeeves.sqlite3
+### 5.3 `query-status`
+Fetches safety/auditing metrics for a past resident query:
+```powershell
+python -m aptjeeves.cli query-status --query-id QUERY_ID
 ```
 
-An explicit `--db` value remains available as an override for tests, local debugging, and one-off runs. In normal operation, `--apartment` should be the selector so data, facts, privacy decisions, and observability traces do not mix across apartments.
-
-`--chat-name` should be optional for ingestion. When it is omitted, the CLI should infer the chat/channel name from the export filename. For example:
-
-```text
-WhatsApp Chat with Apartment Main.txt -> Apartment Main
-tower-a-vendors.txt -> tower a vendors
+### 5.4 `extract-pending`
+Processes pending raw messages to extract structured canonical facts:
+```powershell
+python -m aptjeeves.cli extract-pending [--limit N]
 ```
 
-If the export filename changes across monthly imports, the caller should pass a stable `--chat-name`. The chat/channel name is part of `source_conversation_id`, which is part of the fallback `message_fingerprint`. Keeping it stable is required for duplicate detection across repeated full-history imports.
-
-Multiple chat channels from one apartment should share the same apartment database and differ only by `source_conversation_id`.
-
-### 4.2 Ingestion Flow
-
-```text
-create import_runs row
-hash source file
-parse file into message candidates
-normalize sender, timestamp, and text
-redact sensitive values
-compute message_fingerprint
-insert raw_messages row
-skip unique constraint conflicts as duplicates
-extract facts only from newly inserted messages
-upsert canonical facts
-refresh vector entries for changed facts
-write final import stats
+### 5.5 `reset-failed`
+Resets the processing status of failed messages back to `new` for re-processing:
+```powershell
+python -m aptjeeves.cli reset-failed
 ```
 
-The service should run ingestion in batches and commit at safe boundaries:
-
-```text
-import run creation: one transaction
-raw message insertion: batch transactions
-extraction and fact upsert: message-level or chunk-level transactions
-vector refresh: fact-level transactions
+### 5.6 `index-facts`
+Indexes canonical facts in the vector store:
+```powershell
+python -m aptjeeves.cli index-facts [--limit N]
 ```
 
-### 4.3 Message Normalization
-
-Normalize into an internal shape:
-
-```json
-{
-  "platform": "whatsapp",
-  "source_conversation_id": "sha256:...",
-  "chat_name": "Apartment Main",
-  "source_message_id": null,
-  "sender_hash": "sha256:...",
-  "sender_display_hint": "Resident A",
-  "sent_at_utc": "2026-04-16T09:30:00Z",
-  "source_timezone": "Asia/Kolkata",
-  "normalized_text": "Contact Ramesh for plumbing. He charged Rs 500.",
-  "source_file": "exports/apartment-main.txt",
-  "source_offset": 12345,
-  "source_line_start": 401,
-  "source_line_end": 401
-}
+### 5.7 `ask`
+Answers a question using the RAG pipeline:
+```powershell
+python -m aptjeeves.cli ask "Your question" [--top-k K] [--max-facts N]
 ```
 
-Normalization rules:
-
-```text
-trim leading/trailing whitespace
-collapse repeated whitespace
-normalize Unicode punctuation where safe
-convert timestamps to UTC
-preserve original source timezone
-remove platform boilerplate
-remove media placeholders for Phase 1
-normalize sender aliases before hashing
-ignore empty messages after cleanup
+### 5.8 `replay-import`
+Replays fact extraction and vector indexing on a past import batch:
+```powershell
+python -m aptjeeves.cli replay-import --batch BATCH_ID --from-stage extraction
 ```
 
-### 4.4 Message Fingerprint
-
-If the platform has a stable native message ID:
-
-```text
-message_fingerprint = sha256(platform + source_conversation_id + source_message_id)
+### 5.9 `replay-fact-index`
+Replaces the vector entry for a specific fact ID:
+```powershell
+python -m aptjeeves.cli replay-fact-index --fact FACT_ID
 ```
 
-Fallback fingerprint:
-
-```text
-message_fingerprint = sha256(
-  platform + "\n" +
-  source_conversation_id + "\n" +
-  canonical_sender + "\n" +
-  normalized_sent_at_utc + "\n" +
-  normalized_text_hash + "\n" +
-  attachment_hashes_or_markers
-)
+### 5.10 `replay-query`
+Re-runs a past user query from its redacted text:
+```powershell
+python -m aptjeeves.cli replay-query --query-id QUERY_ID [--top-k K] [--max-facts N]
 ```
 
-Canonicalization requirements:
-
-```text
-timestamp precision should be fixed to seconds unless source has stable milliseconds
-sender should be normalized before hashing
-text hash should be computed after whitespace/platform cleanup
-conversation ID should be derived from platform + chat name or export metadata
-attachment markers should be stable placeholders in Phase 1
+### 5.11 `show-events`
+Prints a list of recent database pipeline events:
+```powershell
+python -m aptjeeves.cli show-events --limit N
 ```
 
-Do not use only sender + datetime. It is not stable enough for long-term dedupe.
+---
 
-### 4.5 Duplicate Handling
+## 6. FastAPI Backend API Reference
 
-Duplicate path:
+The FastAPI server provides backend endpoints and coordinates background execution:
 
-```text
-attempt insert into raw_messages
-if unique constraint on message_fingerprint fails:
-  increment duplicate_messages_skipped
-  emit duplicate_message_skipped event
-  do not call extractor
-```
+### 6.1 Server Architecture
+- **Tech Stack**: FastAPI, Uvicorn, Python standard logging.
+- **CORS Middlewares**: Restricted to `http://localhost:5173` to prevent unauthorized cross-origin calls.
+- **Background Tasks**: Long-running indexing and extraction tasks are executed in backend worker threads via FastAPI `BackgroundTasks`.
 
-This allows repeated monthly full imports.
+### 6.2 API Specifications
+- **`GET /api/apartments`**
+  - *Returns*: Array of strings representing available apartment database slugs.
+- **`GET /api/{apartment}/status`**
+  - *Returns*: Metrics on ingested messages, extracted facts, active vectors, and extraction queue status.
+- **`POST /api/{apartment}/ask`**
+  - *Body*: `AskRequest` (redacted/raw query text, top-k).
+  - *Returns*: Answer text, citations array, confidence rating, intent type, and query run ID.
+- **`GET /api/{apartment}/settings` & `POST /api/{apartment}/settings`**
+  - *Read/Write*: Per-apartment configuration overrides (e.g. choice of embedding model, extraction backend).
+- **`POST /api/{apartment}/upload`**
+  - *Content*: Multipart form data (list of text/json export files, timezone, date-order formatting).
+  - *Behavior*: Ingests raw messages, then triggers background extraction and indexing.
+- **`GET /api/{apartment}/observability`**
+  - *Returns*: Aggregated execution stats (token counts, LLM API costs, latencies).
+- **`GET /api/{apartment}/logs`**
+  - *Returns*: SQLite database logging entries (`pipeline_events` table).
+- **`POST /api/{apartment}/reset-failed`**
+  - *Behavior*: Re-queues messages that failed extraction by resetting their state back to `new`, preventing double charge of successful runs.
 
-### 4.6 Parse Failures
+---
 
-Parse failures should not fail the whole import unless the file is unreadable or the parser is clearly wrong.
+## 7. React Frontend SPA Reference
 
-For each failed message:
+Built as a single page dashboard focused on administrative control and resident-facing assistant chat.
 
-```text
-increment parse_failures
-emit parse_failure event with sanitized source metadata
-continue import
-```
+### 7.1 UI Technology Stack
+- **Framework**: React with TypeScript, compiled using Vite.
+- **Router**: React Router.
+- **State Management**: TanStack React Query (polling active status, caching backend events).
+- **Styling**: Tailwind CSS and Radix UI primitives.
 
-If parse failure rate exceeds a configured threshold, mark the import as `completed_with_errors` or `failed`.
-
-## 5. Privacy And Redaction Design
-
-Privacy has to run before model calls, before storage/indexing, and before final answer delivery.
-
-### 5.1 PII Detection
-
-Deterministic detectors should identify:
-
-```text
-phone numbers
-email addresses
-URLs
-flat numbers
-tower/block identifiers
-address-like strings
-vehicle numbers, if obvious
-names near resident markers
-```
-
-### 5.2 Placeholder Strategy
-
-Replace detected sensitive values with typed placeholders:
-
-```text
-PHONE_1
-EMAIL_1
-URL_1
-FLAT_1
-ADDRESS_1
-CONTACT_1
-```
-
-The extractor should see sanitized text:
-
-```text
-"Please contact CONTACT_1 for pest control. PHONE_1. He charged Rs 1200."
-```
-
-### 5.3 Contact Privacy Classification
-
-Classify contacts as:
+### 7.2 Layout & Navigation
+- **Persistent Sidebar**: Static navigation sidebar containing links to Chat, Ingestion, Stats, Usage, and Logs pages.
+- **Global Context Selector**: Dropdown selector inside the sidebar to switch between active Apartment databases dynamically.
 
 ```text
-vendor_or_service_contact
-resident_contact
-resident_affiliated_service_contact
-apartment_staff_contact
-unknown_contact
++-------------------------------------------------------------+
+|  Apartment  |                                               |
+|  [Select v] |             ACTIVE COMPONENT VIEW             |
+|-------------|                                               |
+|  [ Chat ]   |  e.g. Chat Box, Citation Expanders,           |
+|  [ Ingest ] |       Observability Cost Charts,              |
+|  [ Stats ]  |       or Database Logs Viewer                 |
+|  [ Usage ]  |                                               |
+|  [ Logs ]   |                                               |
++-------------------------------------------------------------+
 ```
 
-Default rule:
+### 7.3 Page Views & Features
+1. **Chat Panel**:
+   - Dynamic message cards.
+   - Grounded LLM citations shown as toggleable details underneath responses.
+   - Visual badges for Confidence (`high`, `medium`, `none`) and safety warnings.
+2. **Ingestion & Tasks**:
+   - Folder Selector using HTML5 directory inputs. Matches files and guides the user to select the primary chat log.
+   - Live progress bars indicating active background extraction and vector indexing tasks.
+3. **Observability Cost Tracker**:
+   - Aggregated metrics indicating OpenAI API token consumption, computed in dollars based on model pricing.
+   - Latency breakdowns across intent classification, retrieval, embedding, and answering.
+4. **Statistics**:
+   - Displays number of active vectors, fact count breakdown by category, and queue sizes.
+5. **Settings & Recovery**:
+   - Per-apartment setting manager (model parameters).
+   - "Reset Failed State" button to easily restart failed runs.
+6. **Logs page**:
+   - Live feed of database pipeline events.
+   - Link tags that open direct Langfuse trace pages.
 
-```text
-unknown_contact => restricted_unknown_contact
-resident_contact => restricted_resident_pii
-resident_affiliated_service_contact => restricted unless explicit service-safe evidence exists
+---
+
+## 8. Automated Testing & Offline Safety
+
+The test suite ensures total safety when changes are made.
+
+### 8.1 Unit & Integration Testing
+- **Unit Tests**: Coverage includes WhatsApp parsing regexes, Telegram JSON extraction structure, PII detection accuracy, and reranking scoring logic.
+- **Integration Tests**: Tests monthly full-history updates (first import inserts $N$ messages, second import of same history inserts $0$ messages, third import of expanded history inserts only $M$ new messages). Verifies query flows with mock models.
+
+### 8.2 Offline Testing Safety (Auto-Mocking)
+To protect OpenAI and Langfuse API credits, `tests/conftest.py` declares an autouse fixture that intercepts and patches environment variables:
+```python
+@pytest.fixture(autouse=True)
+def ensure_dotenv_loaded(monkeypatch) -> None:
+    load_dotenv()
+    # Disable Langfuse cloud communication
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
+    monkeypatch.setenv("LANGFUSE_HOST", "")
+    
+    # Force mock and local backends to prevent network calls
+    monkeypatch.setenv("APTJEEVES_EXTRACTION_BACKEND", "fake")
+    monkeypatch.setenv("APTJEEVES_INTENT_BACKEND", "keyword")
+    monkeypatch.setenv("APTJEEVES_EMBEDDING_MODEL", "local")
+    monkeypatch.setenv("APTJEEVES_LLM_PROVIDER", "disabled")
 ```
 
-Evidence that may support service-safe classification:
-
-```text
-multiple residents recommend the same contact as a service provider
-message text explicitly says plumber, electrician, cook, maid, driver, vendor, doctor, shop, security, manager
-contact appears in vendor/service context rather than personal resident context
-same contact is mentioned across different senders as a service
-```
-
-Evidence that should restrict:
-
-```text
-flat number near the contact
-same-apartment resident marker
-sender appears to share their own number
-message says "my number", "call me", "I stay in", or equivalent
-one-off contact with no service context
-```
-
-### 5.4 Storage Rules
-
-Normal durable storage:
-
-```text
-sanitized text only
-hashed sender IDs
-hashed normalized text
-approved service contact methods only when privacy_status allows
-no resident phone numbers
-```
-
-Restricted debug/quarantine mode:
-
-```text
-off by default
-local-only
-explicitly configured
-separate storage path
-short retention
-never used for embeddings
-never used for answer context
-```
-
-## 6. LLM Extraction Design
-
-### 6.1 Extraction Input
-
-The extractor receives chunks of sanitized messages:
-
-```json
-{
-  "trace_id": "trace_...",
-  "messages": [
-    {
-      "message_id": "msg_...",
-      "message_fingerprint": "sha256...",
-      "sent_at_utc": "2026-04-16T09:30:00Z",
-      "sender_hash": "sha256...",
-      "sanitized_text": "Contact CONTACT_1 for plumbing. He charged Rs 500."
-    }
-  ]
-}
-```
-
-Chunking guidance:
-
-```text
-group by conversation and nearby time window
-keep chunks small enough for reliable structured extraction
-include message IDs for source attribution
-do not include raw PII
-```
-
-### 6.2 Extraction Output Schema
-
-The LLM must return strict JSON.
-
-```json
-{
-  "facts": [
-    {
-      "fact_type": "service_contact",
-      "identity_key_hint": "plumber|ramesh|phone_hash_x",
-      "title": "Plumber contact",
-      "summary": "Residents mentioned a plumber for household plumbing work.",
-      "confidence": 0.78,
-      "privacy_status_hint": "needs_review",
-      "source_message_ids": ["msg_123"],
-      "sanitized_snippets": [
-        "Contact CONTACT_1 for plumbing. He charged Rs 500."
-      ],
-      "service_contact": {
-        "service_type": "plumber",
-        "display_name": "Ramesh",
-        "contact_methods": [
-          {
-            "type": "phone",
-            "value_placeholder": "PHONE_1",
-            "value_hash": "sha256...",
-            "exposure_recommendation": "needs_review"
-          }
-        ],
-        "contact_classification": "vendor_or_service_contact",
-        "is_resident_affiliated": false,
-        "resident_affiliation_reason": null,
-        "price_hint": "Rs 500",
-        "availability_hint": null,
-        "caveats": null
-      }
-    }
-  ],
-  "warnings": []
-}
-```
-
-For `process_info`:
-
-```json
-{
-  "fact_type": "process_info",
-  "identity_key_hint": "gas-address-update|indane|bangalore",
-  "title": "Gas address update process",
-  "summary": "Residents discussed updating the address for a gas connection.",
-  "confidence": 0.71,
-  "source_message_ids": ["msg_456"],
-  "process_info": {
-    "process_name": "Gas address update",
-    "category": "utilities",
-    "provider_or_authority": "Gas provider",
-    "steps": ["Visit provider portal or office", "Submit proof of address"],
-    "required_documents": ["Address proof"],
-    "fees": [],
-    "locations_or_portals": [],
-    "deadlines": [],
-    "caveats": "Community-discussed information only; not officially verified.",
-    "staleness_risk": "high"
-  }
-}
-```
-
-For `facility_info`:
-
-```json
-{
-  "fact_type": "facility_info",
-  "identity_key_hint": "clubhouse|booking|process",
-  "title": "Clubhouse booking process",
-  "summary": "Residents discussed how to book the clubhouse.",
-  "confidence": 0.82,
-  "source_message_ids": ["msg_789"],
-  "facility_info": {
-    "facility_name": "Clubhouse",
-    "info_type": "booking_process",
-    "location_hint": null,
-    "availability": null,
-    "rules_or_steps": ["Contact the facility office", "Check availability"],
-    "caveats": null
-  }
-}
-```
-
-### 6.3 Extraction Validation
-
-Reject or quarantine extraction output when:
-
-```text
-JSON is invalid
-required fields are missing
-source_message_ids do not map to the input messages
-raw-looking phone/email/address values appear instead of placeholders
-confidence is outside 0..1
-fact_type is unsupported
-privacy_status_hint is invalid
-```
-
-### 6.4 Canonical Fact Upsert
-
-The application, not the LLM, should compute the final `fact_identity_key`.
-
-Examples:
-
-```text
-service_contact_key = sha256(service_type + normalized_name + contact_method_hashes)
-process_info_key = sha256(process_name + provider_or_authority + normalized_scope)
-facility_info_key = sha256(facility_name + info_type + normalized_value)
-```
-
-Merge behavior:
-
-```text
-if fact_identity_key exists:
-  append fact_evidence rows
-  update latest_seen
-  increment source_count only for new source messages
-  update summary if new evidence materially improves it
-  increment fact_version if retrieval text changes
-else:
-  create canonical_facts row and subtype row
-```
-
-Conflicting evidence should not overwrite blindly. Store it as new evidence and lower confidence or set `needs_review` if needed.
-
-## 7. Vector Indexing Design
-
-Only sanitized fact text is embedded.
-
-Embedding text template for service contacts:
-
-```text
-Fact type: service_contact
-Service type: plumber
-Name: Ramesh
-Summary: Residents mentioned this contact for plumbing work.
-Area/scope: apartment community
-Evidence: 3 mentions, latest 2026-04-16
-Caveats: service contact classification needs review
-```
-
-Embedding text template for process info:
-
-```text
-Fact type: process_info
-Process: Gas address update
-Authority/provider: Gas provider
-Summary: Residents discussed updating address for gas connection.
-Steps: ...
-Documents: ...
-Caveats: Community-discussed information only; not officially verified.
-```
-
-Refresh rules:
-
-```text
-when canonical_facts.fact_version changes, mark vector_entries stale
-generate new embedding_text
-compute embedding_hash
-if embedding_hash changed, refresh vector store
-mark vector entry active
-```
-
-Phase 1 can use a simple local vector store abstraction even if the first backend is SQLite plus an external embedding column/file. The rest of the system should depend on the abstraction, not the backend.
-
-## 8. Query And Retrieval Design
-
-### 8.1 Query Flow
-
-```text
-create query_id and trace_id
-classify intent
-redact query for logging and model calls
-embed sanitized query
-retrieve vector candidates
-load canonical facts and subtype rows
-rerank candidates
-apply privacy filters
-build answer context
-generate grounded answer
-validate final answer
-return response
-```
-
-### 8.2 Intent Types
-
-```text
-find_service_contact
-ask_process_steps
-ask_facility_info
-ask_policy_or_rule
-ask_alert_or_issue
-general_or_unknown
-```
-
-Intent classification may be deterministic first and LLM-assisted later.
-
-### 8.3 Reranking Formula
-
-Use a transparent scoring model:
-
-```text
-final_score =
-  semantic_similarity * 0.45
-  + source_count_score * 0.15
-  + recency_score * 0.15
-  + confidence_score * 0.15
-  + fact_type_match_score * 0.10
-  - stale_data_penalty
-  - privacy_risk_penalty
-```
-
-Suggested normalization:
-
-```text
-semantic_similarity: vector score normalized 0..1
-source_count_score: log-scaled mention count, capped at 1
-recency_score: decay based on latest_seen
-confidence_score: canonical_facts.confidence
-fact_type_match_score: 1 for exact intent/fact match, 0.5 for related, 0 for unrelated
-stale_data_penalty: higher for process_info with old latest_seen
-privacy_risk_penalty: high for restricted or needs_review contacts
-```
-
-### 8.4 Context Builder
-
-The answer context should be compact and structured:
-
-```json
-{
-  "query_id": "query_...",
-  "intent": "find_service_contact",
-  "facts": [
-    {
-      "fact_id": "fact_...",
-      "fact_type": "service_contact",
-      "title": "Plumber contact",
-      "summary": "...",
-      "approved_contact_methods": [],
-      "privacy_status": "needs_review",
-      "source_count": 3,
-      "latest_seen": "2026-04-16T09:30:00Z",
-      "confidence": 0.78,
-      "sanitized_snippets": ["..."],
-      "caveats": ["Contact method not shareable until reviewed."]
-    }
-  ]
-}
-```
-
-Never include restricted resident PII in context.
-
-## 9. Answer Generation Design
-
-The answerer should use a low-temperature model call with strict instructions:
-
-```text
-answer only from supplied context
-do not use outside knowledge
-do not expose resident phone numbers
-do not expose restricted contact methods
-include source count and latest mention when available
-say when information is unavailable
-for government/legal/admin processes, say this is community-discussed and not officially verified
-```
-
-Response shape:
-
-```json
-{
-  "answer": "Residents mentioned a plumber, but the contact method is not shareable yet because it needs privacy review.",
-  "citations": [
-    {
-      "fact_id": "fact_...",
-      "source_count": 3,
-      "latest_seen": "2026-04-16T09:30:00Z",
-      "snippet": "Contact CONTACT_1 for plumbing."
-    }
-  ],
-  "confidence": "medium",
-  "privacy_note": "Contact method restricted pending review."
-}
-```
-
-## 10. Guardrail Design
-
-Final guardrails run after answer generation.
-
-Checks:
-
-```text
-resident phone number leakage
-restricted email leakage
-flat/address leakage
-raw unsanitized snippet leakage
-unsupported claims not present in context
-government/process over-certainty
-contact method exposure when privacy_status forbids it
-```
-
-Actions:
-
-```text
-pass
-redact
-repair_with_llm
-refuse_safely
-```
-
-Safe fallback:
-
-```text
-I found related discussion, but the contact or details appear restricted or unverified, so I cannot share them. I can share the general service/process information from the discussion.
-```
-
-Every guardrail decision must emit a `guardrail_events` row.
-
-## 11. Observability And Replay Design
-
-### 11.1 Trace IDs
-
-Create a `trace_id` for:
-
-```text
-each import run
-each extraction chunk
-each query
-each replay
-```
-
-Propagate the trace ID across events, LLM calls, retrieval traces, and guardrail events.
-
-### 11.2 Event Style
-
-Structured event payloads must be sanitized:
-
-```json
-{
-  "event_type": "duplicate_message_skipped",
-  "stage": "ingestion",
-  "severity": "info",
-  "import_batch_id": "import_...",
-  "message_fingerprint": "sha256...",
-  "reason": "message_fingerprint already exists"
-}
-```
-
-### 11.3 Replay
-
-Replay should support:
-
-```text
-replay import batch from extraction
-replay single message extraction
-replay fact indexing
-replay query retrieval and answer generation
-```
-
-Replay inputs should be version-aware:
-
-```text
-parser_version
-normalizer_version
-redactor_version
-extractor_prompt_version
-llm_model_version
-embedding_model_version
-reranker_version
-guardrail_version
-```
-
-## 12. Configuration
-
-Configuration should be explicit and local-friendly:
-
-```text
-APTJEEVES_DB_PATH
-APTJEEVES_DATA_DIR
-APTJEEVES_VECTOR_STORE_PATH
-APTJEEVES_DEFAULT_TIMEZONE
-APTJEEVES_ENABLE_RAW_DEBUG_STORE=false
-APTJEEVES_RAW_DEBUG_STORE_PATH
-APTJEEVES_LLM_PROVIDER
-APTJEEVES_LLM_MODEL
-APTJEEVES_EMBEDDING_MODEL
-APTJEEVES_LOG_LEVEL
-```
-
-Default timezone should be configurable. For the current deployment context, `Asia/Kolkata` is a reasonable default, but the parser should not hardcode it in a way that prevents future changes.
-
-For multi-apartment operation, `APTJEEVES_DATA_DIR` controls the base directory used by `--apartment`. The derived DB path is:
-
-```text
-APTJEEVES_DATA_DIR/apartments/<apartment_slug>/aptjeeves.sqlite3
-```
-
-## 13. Testing Strategy
-
-Unit tests:
-
-```text
-WhatsApp parser examples
-Telegram parser examples
-timestamp normalization
-sender hashing
-message_fingerprint stability
-duplicate insert behavior
-PII detectors
-redaction placeholders
-fact identity key generation
-reranking formula
-guardrail leakage checks
-```
-
-Integration tests:
-
-```text
-ingest same export twice and verify second run skips all messages
-ingest expanded monthly export and verify only new messages extract
-extract service contact from sanitized message
-restrict resident phone number answer
-retrieve process_info and include community-discussed caveat
-emit import and query traces
-replay a query with same retrieved facts
-```
-
-Golden test data should use fake residents, fake phone numbers, and fake chats only.
-
-## 14. Implementation Milestones
-
-### Milestone 1: Local Ingestion Foundation
-
-```text
-create project skeleton
-create SQLite schema and migration runner
-implement import_runs and raw_messages repositories
-implement WhatsApp text parser
-implement normalization and message_fingerprint
-implement duplicate skipping
-emit pipeline_events
-provide aptjeeves ingest CLI
-add tests for repeated imports
-```
-
-### Milestone 1.1: Telegram Ingestion Source
-
-```text
-implement Telegram JSON parser
-support --platform telegram
-read Telegram chat metadata when available
-use Telegram native message IDs for message_fingerprint
-store Telegram messages in raw_messages
-preserve apartment database isolation
-preserve chat/channel separation
-add idempotency tests for repeated Telegram imports
-```
-
-### Milestone 2: Privacy Foundation
-
-```text
-implement PII detectors
-implement sanitizer/placeholders
-implement sender hashing
-implement privacy-safe event payloads
-add tests for phone/email/flat redaction
-```
-
-Implementation status:
-
-```text
-implemented deterministic phone/email/URL/flat/address detectors
-implemented per-message typed placeholders
-stores redacted text in raw_messages.sanitized_text
-keeps message_fingerprint based on normalized unredacted text hash
-emits redaction_counts in raw_message_inserted events
-sanitizes parse failure previews before storing pipeline events
-```
-
-Still future work:
-
-```text
-resident vs vendor contact privacy classification
-review workflows for restricted contacts
-final answer guardrails
-more advanced address detection
-```
-
-### Milestone 3: LLM Extraction And Canonical Facts
-
-```text
-define extraction JSON schemas
-implement LLMExtractor abstraction
-validate extraction output
-implement canonical_facts and subtype repositories
-implement fact_evidence
-upsert service_contact, process_info, facility_info
-add extraction observability
-```
-
-Implementation status:
-
-```text
-implemented canonical_facts, service_contacts, process_info, facility_info, fact_evidence tables
-implemented canonical fact repository with merge/upsert behavior
-implemented strict dependency-free extraction payload validator
-implemented fake extractor for deterministic local tests
-implemented extraction service that maps validated facts to canonical storage
-implemented extract-pending CLI command using the fake extractor
-marks raw messages as extracted or no_extractable_info
-emits canonical_fact_upserted pipeline events
-```
-
-Still future work:
-
-```text
-real LLM provider integration
-production prompts
-review workflow for low-confidence/restricted facts
-advanced conflict resolution
-```
-
-### Milestone 4: Vector Indexing
-
-```text
-implement embedding text builders
-implement vector_entries table
-implement vector store abstraction
-refresh vectors after fact changes
-add indexing tests
-```
-
-Implementation status:
-
-```text
-implemented vector_entries table
-implemented local deterministic token-vector embedding model
-implemented sanitized embedding text builders for service_contact, process_info, facility_info
-implemented VectorIndexingService
-implemented index-facts CLI command
-refreshes vector_entries when canonical fact_version changes
-stores embedding_text, embedding_hash, embedding_json, model version, and vector_store_ref
-```
-
-Still future work:
-
-```text
-real semantic embedding provider
-vector similarity retrieval
-hybrid metadata reranking
-embedding backend swap for LanceDB/Chroma/FAISS/SQLite vector extension
-```
-
-### Milestone 5: Retrieval And Answering
-
-```text
-implement intent classifier
-implement retriever
-implement reranker
-implement context builder
-implement answer prompt
-implement final response formatter
-```
-
-Implementation status:
-
-```text
-implemented keyword-based deterministic intent classifier (6 intent types)
-implemented token-vector cosine similarity retriever against active vector_entries
-implemented transparent reranking formula from section 8.3
-implemented structured context builder with privacy filtering
-implemented template-based answer formatter with citations (no LLM)
-implemented retrieval_traces and guardrail_events tables
-implemented QueryService orchestrator for full ask pipeline
-implemented CLI ask command with JSON output
-config loads .env from project root before reading env vars
-```
-
-Still future work:
-
-```text
-real LLM-based intent classification
-real semantic embedding retrieval
-LLM answer generation
-final guardrail validation on generated answers
-```
-
-### Milestone 6: Guardrails, Replay, And Hardening
-
-```text
-implement final guardrail validator
-implement query traces and retrieval traces
-implement replay commands
-add privacy leakage integration tests
-add import/query status commands
-```
-
-Implementation status:
-
-```text
-implemented deterministic final answer guardrail validator
-implemented query_runs ledger for query status and replay
-implemented replay-import, replay-fact-index, replay-query, and query-status CLI commands
-implemented replay service on sanitized stored inputs
-implemented guardrail and replay integration tests
-```
-
-Still future work:
-
-```text
-repair_with_llm flow for safe answer repair
-human review workflow for restricted facts
-broader replay coverage across extraction chunks and single-message repair
-```
-
-### Milestone 7: Model-Backed Intelligence
-
-```text
-implement provider-backed extractor
-implement optional LLM-backed intent classifier
-wire backend selection through config and CLI
-validate provider-backed extraction and ask flows
-record provider versions in observability payloads
-```
-
-Implementation status:
-
-```text
-implemented OpenAI-backed LLMExtractor using the shared extraction contract
-implemented OpenAI-backed intent classifier with deterministic keyword fallback
-added extraction and intent backend selection through config and CLI wiring
-validated provider-backed extractor and ask fallback flows with mocked tests
-```
-
-Still future work:
-
-```text
-multi-provider support beyond OpenAI
-production prompt tuning for extraction and intent classification
-live end-to-end validation against real provider responses
-```
-
-## 15. First Build Recommendation
-
-Start with Milestone 1 and keep the first running product boring:
-
-```text
-one CLI command
-one SQLite database
-one parser path
-one import ledger
-one dedupe mechanism
-one observability table
-tests proving idempotent repeated ingestion
-```
-
-Once repeated ingestion is solid, add redaction and extraction. The LLM layer will be much easier to evolve if the ingestion spine, privacy boundaries, and traceability are already reliable.
+---
+
+## 9. Milestone History & Scope
+
+The project completed 8 distinct development milestones:
+
+- **Milestone 1**: Project layout, SQLite migration runner, raw message ingestion, and WhatsApp parser.
+- **Milestone 1.1**: Telegram parser integration and chat metadata extraction.
+- **Milestone 2**: Regex PII detectors (phone, email, flat, URLs) and redactor placeholder engine.
+- **Milestone 3**: Extractor JSON validator, Canonical fact model repositories, and local Fake extractor.
+- **Milestone 4**: Embedding text template builders, local token embeddings, and indexing queue processor.
+- **Milestone 5**: Retrieval cosine calculator, transparent reranking formula, and template-based deterministic answering.
+- **Milestone 6**: Post-generation guardrail validator, query runs ledger, query-status, and replay CLI tools.
+- **Milestone 7**: OpenAI-backed LLMExtractor and Intent Classifier with keyword fallback.
+- **Milestone 8**: FastAPI endpoints, React SPA dashboard components, folder uploads, and background worker threads.

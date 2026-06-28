@@ -58,3 +58,6 @@ The application will feature a **persistent sidebar** for navigation between the
     *   **Advanced Settings Modal:** Build a UI to change settings like the embedding model per apartment via the `/settings` endpoint.
     *   **Reset Failed State (Error Recovery):** Add an advanced option to trigger the `/reset-failed` endpoint. If the extraction or indexing phase encounters errors and raw messages are marked as `failed`, this option allows resetting their status back to `new`. This ensures only the failed lines are re-processed by the background tasks, preventing wasteful re-extraction of successful entries and saving OpenAI API credits.
     *   **Logs Viewer:** Create a page to display backend SQLite events and provide integrated Langfuse tracing links for LLM calls.
+
+## UI Status Update
+All Phases (1 through 6) of the UI implementation plan have been completed successfully. The FastAPI backend supports folder uploads, settings persistence, background task status monitoring, and safety-audited logs. The React frontend SPA leverages Vite, Tailwind CSS, React Router, and TanStack React Query to present a premium and unified administrative dashboard and chat interface.

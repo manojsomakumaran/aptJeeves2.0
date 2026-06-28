@@ -94,3 +94,6 @@ the repo can run extraction with either fake or OpenAI-backed extractors
 the repo can classify intent with either keyword or OpenAI-backed classifiers
 provider-backed paths are covered by mocked tests and preserve privacy constraints
 ```
+
+## Status Update
+Milestone 7 is fully completed. Extraction can run on either fake or OpenAI backends, intent classification supports both keyword and OpenAI-backed modes, and mock-based tests verify the integration.
