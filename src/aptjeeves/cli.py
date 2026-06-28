@@ -7,62 +7,16 @@ import re
 import sys
 from pathlib import Path
 
-from aptjeeves.answering.formatter import AnswerFormatter
 from aptjeeves.config import Settings, load_settings, resolve_db_path
-from aptjeeves.extraction.fake_extractor import FakeExtractor
-from aptjeeves.extraction.llm_extractor import LLMExtractor
 from aptjeeves.extraction.service import ExtractionService
 from aptjeeves.indexing.indexer import VectorIndexingService
 from aptjeeves.ingestion.service import ChatIngestionService, IngestRequest
 from aptjeeves.observability.replay import ReplayService
-from aptjeeves.retrieval.intent import KeywordIntentClassifier, OpenAIIntentClassifier
 from aptjeeves.retrieval.service import QueryService
 from aptjeeves.storage.db import apply_migrations, connect
 from aptjeeves.storage.repositories import ImportRunRepository, QueryRunRepository, RawMessageRepository
-
-
-def _build_embedding_model(settings: Settings) -> object:
-    """Instantiate the embedding model specified in settings."""
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if settings.embedding_model and settings.embedding_model != "local" and api_key:
-        from aptjeeves.indexing.openai_embeddings import OpenAIEmbeddingModel
-
-        return OpenAIEmbeddingModel(api_key=api_key, model=settings.embedding_model)
-
-    from aptjeeves.indexing.embeddings import LocalTokenEmbeddingModel
-
-    return LocalTokenEmbeddingModel()
-
-
-def _build_answerer(settings: Settings) -> object:
-    """Instantiate the answerer (LLM or template formatter) based on settings."""
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if settings.llm_model and settings.llm_provider == "openai" and api_key:
-        from aptjeeves.answering.llm_answerer import LLMAnswerer
-
-        return LLMAnswerer(api_key=api_key, model=settings.llm_model)
-
-    return AnswerFormatter()
-
-
-def _build_extractor(settings: Settings) -> object:
-    """Instantiate the extractor backend for extraction commands."""
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if settings.extraction_backend == "openai" and api_key:
-        return LLMExtractor(api_key=api_key, model=settings.extraction_model)
-    return FakeExtractor()
-
-
-def _build_intent_classifier(settings: Settings) -> object:
-    """Instantiate the intent classifier backend for ask commands."""
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if settings.intent_backend == "openai" and api_key:
-        return OpenAIIntentClassifier(api_key=api_key, model=settings.intent_model)
-    return KeywordIntentClassifier()
+from aptjeeves.builders import build_embedding_model, build_answerer, build_extractor, build_intent_classifier
+from aptjeeves.answering.formatter import AnswerFormatter
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -188,6 +142,18 @@ def build_parser() -> argparse.ArgumentParser:
     replay_query.add_argument("--top-k", type=int, default=10, help="Maximum retrieval candidates.")
     replay_query.add_argument("--max-facts", type=int, default=5, help="Maximum facts in the answer.")
 
+    show_events = subparsers.add_parser("show-events", help="Show recent pipeline events from the database.")
+    show_events.add_argument(
+        "--apartment",
+        required=True,
+        help="Apartment chatbot name used to select the database.",
+    )
+    show_events.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Number of recent events to show.",
+    )
     return parser
 
 
@@ -313,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "extract-pending":
-        extractor = _build_extractor(settings)
+        extractor = build_extractor(settings)
         service = ExtractionService(connection, extractor)
         summary = service.extract_pending(limit=args.limit)
         print(
@@ -332,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "index-facts":
-        embedding_model = _build_embedding_model(settings)
+        embedding_model = build_embedding_model(settings)
         service = VectorIndexingService(connection, embedding_model)
         summary = service.index_pending(limit=args.limit)
 
@@ -360,13 +326,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "ask":
-        embedding_model = _build_embedding_model(settings)
-        answerer = _build_answerer(settings)
+        embedding_model = build_embedding_model(settings)
+        answerer = build_answerer(settings)
         service = QueryService(
             connection,
             embedding_model=embedding_model,
             answerer=answerer,
-            intent_classifier=_build_intent_classifier(settings),
+            intent_classifier=build_intent_classifier(settings),
             top_k=args.top_k,
             max_answer_facts=args.max_facts,
         )
@@ -380,8 +346,8 @@ def main(argv: list[str] | None = None) -> int:
         replay = ReplayService(connection)
         result = replay.replay_import(
             import_batch_id=args.batch,
-            extractor=_build_extractor(settings),
-            embedding_model=_build_embedding_model(settings),
+            extractor=build_extractor(settings),
+            embedding_model=build_embedding_model(settings),
         )
         result["db_path"] = str(db_path)
         print(json.dumps(result, indent=2))
@@ -391,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         replay = ReplayService(connection)
         result = replay.replay_fact_index(
             fact_id=args.fact,
-            embedding_model=_build_embedding_model(settings),
+            embedding_model=build_embedding_model(settings),
         )
         result["db_path"] = str(db_path)
         print(json.dumps(result, indent=2))
@@ -401,15 +367,36 @@ def main(argv: list[str] | None = None) -> int:
         replay = ReplayService(connection)
         answer = replay.replay_query(
             query_id=args.query_id,
-            embedding_model=_build_embedding_model(settings),
-            answerer=_build_answerer(settings),
-            intent_classifier=_build_intent_classifier(settings),
+            embedding_model=build_embedding_model(settings),
+            answerer=build_answerer(settings),
+            intent_classifier=build_intent_classifier(settings),
             top_k=args.top_k,
             max_answer_facts=args.max_facts,
         )
         output = AnswerFormatter().to_json(answer)
         output["db_path"] = str(db_path)
         print(json.dumps(output, indent=2))
+        return 0
+
+    if args.command == "show-events":
+        table_exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='pipeline_events'"
+        ).fetchone()
+        if not table_exists:
+            print(f"No 'pipeline_events' table found in {db_path}", file=sys.stderr)
+            return 1
+
+        cursor = connection.execute(
+            "SELECT created_at, event_type, severity as status, stage, sanitized_payload_json as details FROM pipeline_events ORDER BY created_at DESC LIMIT ?",
+            (args.limit,)
+        )
+        events = [dict(row) for row in cursor]
+
+        if not events:
+            print(f"No events found in {db_path}", file=sys.stderr)
+            return 0
+
+        print(json.dumps(events, indent=2))
         return 0
 
     raise AssertionError(f"Unhandled command: {args.command}")
