@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 # API Server Entrypoint
 # (Forced save to disk)
 
+OBSERVABILITY_CACHE: dict[str, tuple[float, dict]] = {}
+
 app = FastAPI(title="AptJeeves 2.0 API")
 
 # Allow React frontend to communicate with this API
@@ -38,6 +40,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def cleanup_stale_tasks():
+    """Startup handler to mark any stale running background tasks as interrupted."""
+    import glob
+    settings = load_settings()
+    db_paths = glob.glob(str(Path(settings.data_dir) / "apartments" / "*" / "aptjeeves.sqlite3"))
+    for db_path in db_paths:
+        conn = connect(Path(db_path))
+        try:
+            events = ObservabilityService(conn)
+            for stage in ["extraction", "indexing"]:
+                # Check if the last event is background_task_started or background_task_progress
+                last_event = conn.execute(
+                    "SELECT trace_id, event_type FROM pipeline_events WHERE stage = ? AND event_type IN ('background_task_started', 'background_task_progress', 'background_task_completed', 'background_task_failed') ORDER BY created_at DESC LIMIT 1",
+                    (stage,)
+                ).fetchone()
+                if last_event and last_event["event_type"] in ("background_task_started", "background_task_progress"):
+                    events.emit(
+                        trace_id=last_event["trace_id"],
+                        event_type="background_task_failed",
+                        stage=stage,
+                        status="error",
+                        payload={"task": "interrupted", "error": "Task was interrupted by server restart."}
+                    )
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to cleanup stale tasks for {db_path}: {e}")
+        finally:
+            conn.close()
 
 
 # --- Dependencies ---
@@ -77,13 +110,16 @@ def get_apartment_local_settings(conn) -> dict:
     return {row["key"]: row["value"] for row in rows}
 
 def _apply_local_settings(conn, settings: Settings) -> Settings:
+    from dataclasses import replace
     local_settings = get_apartment_local_settings(conn)
-    new_settings = copy.copy(settings)
+    changes = {}
     if "embedding_model" in local_settings:
-        new_settings.embedding_model = local_settings["embedding_model"]
+        changes["embedding_model"] = local_settings["embedding_model"]
     if "extraction_model" in local_settings:
-        new_settings.extraction_model = local_settings["extraction_model"]
-    return new_settings
+        changes["extraction_model"] = local_settings["extraction_model"]
+    if changes:
+        return replace(settings, **changes)
+    return settings
 
 # --- Routes: Chat & Query ---
 
@@ -144,7 +180,7 @@ def get_processing_status(apartment: str, settings: Settings = Depends(get_setti
         
         # Fetch recent imports from the database
         recent_imports = conn.execute(
-            "SELECT import_batch_id, started_at, source_platform, new_messages_inserted FROM import_runs ORDER BY started_at DESC LIMIT 5"
+            "SELECT import_batch_id, started_at, source_platform, total_messages_seen, new_messages_inserted, duplicate_messages_skipped FROM import_runs ORDER BY started_at DESC LIMIT 5"
         ).fetchall()
         
         history = []
@@ -154,11 +190,18 @@ def get_processing_status(apartment: str, settings: Settings = Depends(get_setti
                 "batch_id": row["import_batch_id"][:10] + "...",
                 "platform": row["source_platform"],
                 "messages": row["new_messages_inserted"],
+                "total": row["total_messages_seen"],
+                "skipped": row["duplicate_messages_skipped"],
             })
 
         local_settings_dict = get_apartment_local_settings(conn)
         current_embedding_model = local_settings_dict.get("embedding_model", settings.embedding_model)
         current_extraction_model = local_settings_dict.get("extraction_model", settings.extraction_model)
+
+        # Build the embedding model to get its exact database model_version (e.g. openai_text-embedding-3-small_v1)
+        local_settings = _apply_local_settings(conn, settings)
+        embedding_model = build_embedding_model(local_settings)
+        embedding_model_version = embedding_model.model_version
 
         return {
             "messages": {
@@ -168,10 +211,10 @@ def get_processing_status(apartment: str, settings: Settings = Depends(get_setti
             },
             "facts": {
                 "total": fact_repo.connection.execute("SELECT COUNT(*) as count FROM canonical_facts").fetchone()["count"],
-                "pending_indexing": fact_repo.count_facts_for_indexing(embedding_model_version=current_embedding_model)
+                "pending_indexing": fact_repo.count_facts_for_indexing(embedding_model_version=embedding_model_version)
             },
             "vectors": {
-                "active": vector_repo.count_active(embedding_model_version=current_embedding_model)
+                "active": vector_repo.count_active(embedding_model_version=embedding_model_version)
             },
             "current_models": {
                 "extraction": current_extraction_model,
@@ -295,38 +338,95 @@ async def upload_chat_export(
 @app.get("/api/{apartment}/observability")
 def get_observability_stats(apartment: str, settings: Settings = Depends(get_settings)):
     """Fetch real OpenAI token usage, estimated costs, and latency metrics."""
-    db_path = resolve_db_path(settings=settings, explicit_db_path=None, apartment=apartment)
-    conn = connect(db_path)
-    apply_migrations(conn)
-    try:
-        # Check if llm_calls table exists first
-        table_exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='llm_calls'"
-        ).fetchone()
-        
-        if table_exists:
-            # Aggregate Total Tokens and Cost
-            usage_row = conn.execute(
-                "SELECT SUM(input_tokens + output_tokens) as total_tokens, SUM(CAST(estimated_cost AS REAL)) as total_cost FROM llm_calls"
-            ).fetchone()
+    import time
+    now = time.time()
+    
+    # Return from cache if still valid (TTL = 15 seconds)
+    if apartment in OBSERVABILITY_CACHE:
+        cache_time, cached_stats = OBSERVABILITY_CACHE[apartment]
+        if now - cache_time < 15.0:
+            return cached_stats
             
-            # Aggregate Average Latencies per operation type
-            latency_rows = conn.execute(
-                "SELECT purpose, AVG(latency_ms) as avg_latency FROM llm_calls GROUP BY purpose"
-            ).fetchall()
-        else:
-            usage_row = {"total_tokens": 0, "total_cost": 0.0}
-            latency_rows = []
-        
-        return {
-            "usage": {
-                "total_tokens": usage_row["total_tokens"] or 0,
-                "total_cost": usage_row["total_cost"] or 0.0
-            },
-            "latencies": {row["purpose"]: round(row["avg_latency"] or 0, 2) for row in latency_rows}
-        }
-    finally:
-        conn.close()
+    from aptjeeves.config import get_langfuse_client
+    client = get_langfuse_client()
+    if client:
+        try:
+            # Query observations linked to this apartment using pagination to fetch ALL history (cap at 10 pages = 1000 items)
+            all_observations = []
+            page = 1
+            max_pages = 10
+            while page <= max_pages:
+                obs_page = client.get_observations(user_id=apartment, type="GENERATION", page=page, limit=100)
+                if not obs_page.data:
+                    break
+                all_observations.extend(obs_page.data)
+                if len(obs_page.data) < 100:
+                    break
+                page += 1
+                
+            if not all_observations:
+                # Fallback: Query all project observations (useful for untagged historical runs)
+                page = 1
+                while page <= max_pages:
+                    obs_page = client.get_observations(type="GENERATION", page=page, limit=100)
+                    if not obs_page.data:
+                        break
+                    all_observations.extend(obs_page.data)
+                    if len(obs_page.data) < 100:
+                        break
+                    page += 1
+            
+            total_tokens = 0
+            total_cost = 0.0
+            latency_sums = {}
+            latency_counts = {}
+            
+            for obs in all_observations:
+                tokens = 0
+                if obs.usage and hasattr(obs.usage, "total"):
+                    tokens = obs.usage.total or 0
+                elif obs.usage and isinstance(obs.usage, dict):
+                    tokens = obs.usage.get("total", 0)
+                total_tokens += tokens
+                
+                cost = 0.0
+                if obs.calculated_total_cost is not None:
+                    cost = float(obs.calculated_total_cost)
+                total_cost += cost
+                
+                if obs.latency is not None and obs.name:
+                    purpose = obs.name
+                    # Convert to milliseconds
+                    latency_sums[purpose] = latency_sums.get(purpose, 0.0) + (float(obs.latency) * 1000.0)
+                    latency_counts[purpose] = latency_counts.get(purpose, 0) + 1
+            
+            latencies = {}
+            for purpose, total_lat in latency_sums.items():
+                count = latency_counts[purpose]
+                latencies[purpose] = round(total_lat / count, 2)
+            
+            stats = {
+                "usage": {
+                    "total_tokens": total_tokens,
+                    "total_cost": total_cost
+                },
+                "latencies": latencies
+            }
+            # Cache the result
+            OBSERVABILITY_CACHE[apartment] = (now, stats)
+            return stats
+        except Exception as e:
+            logger.error(f"Failed to fetch observability stats from Langfuse: {e}", exc_info=True)
+
+    # Fallback response when Langfuse is not initialized or fails
+    fallback_stats = {
+        "usage": {
+            "total_tokens": 0,
+            "total_cost": 0.0
+        },
+        "latencies": {}
+    }
+    return fallback_stats
 
 
 @app.get("/api/{apartment}/logs")
@@ -344,7 +444,7 @@ def get_recent_logs(apartment: str, limit: int = 100, settings: Settings = Depen
             return {"events": []}
             
         cursor = conn.execute(
-            "SELECT created_at as timestamp, event_type, severity as status, sanitized_payload_json as details FROM pipeline_events ORDER BY created_at DESC LIMIT ?", 
+            "SELECT created_at as timestamp, event_type, stage, trace_id, severity as status, sanitized_payload_json as details FROM pipeline_events ORDER BY created_at DESC LIMIT ?", 
             (limit,)
         )
         events = [dict(row) for row in cursor]
@@ -354,8 +454,14 @@ def get_recent_logs(apartment: str, limit: int = 100, settings: Settings = Depen
 
 # --- Routes: Background Tasks (Extraction & Indexing) ---
 
+@observe(name="run_extraction_task")
 def run_extraction_task(db_path: Path, settings: Settings, limit: int = 100):
     """Background task to process the extraction queue."""
+    apartment = db_path.parent.name
+    langfuse_context.update_current_trace(
+        user_id=apartment,
+        tags=[apartment]
+    )
     conn = connect(db_path)
     events = ObservabilityService(conn)
     trace_id = f"trace_bg_extract_{uuid.uuid4().hex}"
@@ -364,8 +470,28 @@ def run_extraction_task(db_path: Path, settings: Settings, limit: int = 100):
         local_settings = _apply_local_settings(conn, settings)
         extractor = build_extractor(local_settings)
         service = ExtractionService(conn, extractor)
-        summary = service.extract_pending(limit=limit)
-        events.emit(trace_id=trace_id, event_type="background_task_completed", stage="extraction", status="success", payload={"task": "run_extraction_task", "facts_extracted": len(summary.fact_ids)})
+        
+        total_extracted = 0
+        batch = 0
+        while True:
+            summary = service.extract_pending(limit=limit)
+            total_extracted += len(summary.fact_ids)
+            batch += 1
+            events.emit(
+                trace_id=trace_id,
+                event_type="background_task_progress",
+                stage="extraction",
+                payload={
+                    "task": "run_extraction_task",
+                    "batch": batch,
+                    "facts_extracted_so_far": total_extracted,
+                    "remaining_pending": summary.remaining_pending
+                }
+            )
+            if summary.remaining_pending >= summary.total_pending_before or summary.remaining_pending == 0:
+                break
+                
+        events.emit(trace_id=trace_id, event_type="background_task_completed", stage="extraction", status="success", payload={"task": "run_extraction_task", "facts_extracted": total_extracted})
     except Exception as e:
         logger.error(f"Background extraction task failed: {e}", exc_info=True)
         events.emit(trace_id=trace_id, event_type="background_task_failed", stage="extraction", status="error", payload={"task": "run_extraction_task", "error": str(e)})
@@ -381,8 +507,14 @@ def trigger_extraction(apartment: str, background_tasks: BackgroundTasks, settin
     return ActionResponse(status="success", message="Extraction background task started.")
 
 
+@observe(name="run_indexing_task")
 def run_indexing_task(db_path: Path, settings: Settings, limit: int = 100):
     """Background task to process the indexing queue."""
+    apartment = db_path.parent.name
+    langfuse_context.update_current_trace(
+        user_id=apartment,
+        tags=[apartment]
+    )
     import uuid
     conn = connect(db_path)
     events = ObservabilityService(conn)
@@ -392,8 +524,28 @@ def run_indexing_task(db_path: Path, settings: Settings, limit: int = 100):
         local_settings = _apply_local_settings(conn, settings)
         embedding_model = build_embedding_model(local_settings)
         service = VectorIndexingService(conn, embedding_model)
-        summary = service.index_pending(limit=limit)
-        events.emit(trace_id=trace_id, event_type="background_task_completed", stage="indexing", status="success", payload={"task": "run_indexing_task", "vectors_upserted": summary.vectors_upserted})
+        
+        total_indexed = 0
+        batch = 0
+        while True:
+            summary = service.index_pending(limit=limit)
+            total_indexed += len(summary.vector_ids)
+            batch += 1
+            events.emit(
+                trace_id=trace_id,
+                event_type="background_task_progress",
+                stage="indexing",
+                payload={
+                    "task": "run_indexing_task",
+                    "batch": batch,
+                    "vectors_indexed_so_far": total_indexed,
+                    "remaining_pending": summary.remaining_pending
+                }
+            )
+            if summary.remaining_pending >= summary.total_pending_before or summary.remaining_pending == 0:
+                break
+                
+        events.emit(trace_id=trace_id, event_type="background_task_completed", stage="indexing", status="success", payload={"task": "run_indexing_task", "vectors_upserted": total_indexed})
     except Exception as e:
         logger.error(f"Background indexing task failed: {e}", exc_info=True)
         events.emit(trace_id=trace_id, event_type="background_task_failed", stage="indexing", status="error", payload={"task": "run_indexing_task", "error": str(e)})

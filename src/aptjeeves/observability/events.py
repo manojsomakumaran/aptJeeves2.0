@@ -61,3 +61,4 @@ class ObservabilityService:
                 utc_now_iso(),
             ),
         )
+        self.connection.commit()

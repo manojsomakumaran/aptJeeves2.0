@@ -21,11 +21,13 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     if path.parent and not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, timeout=30.0)
     # Row objects make repository code clearer than tuple indexes.
     connection.row_factory = sqlite3.Row
     # SQLite leaves foreign keys disabled by default; turn them on per connection.
     connection.execute("PRAGMA foreign_keys = ON")
+    # Enable Write-Ahead Logging (WAL) mode for safe concurrent read/writes.
+    connection.execute("PRAGMA journal_mode = WAL")
     return connection
 
 

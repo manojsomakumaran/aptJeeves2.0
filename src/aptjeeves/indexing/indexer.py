@@ -60,11 +60,41 @@ class VectorIndexingService:
                 limit_applied=limit,
             )
 
+        # 1. Generate all embeddings (network I/O) OUTSIDE the transaction
+        embeddings_to_write = []
+        for fact in fact_rows:
+            embedding_text = self.text_builder.build(fact)
+            embedding_json = self.embedding_model.embed_json(embedding_text)
+            embeddings_to_write.append((fact, embedding_text, embedding_json))
+
+        # 2. Write them to the database (CPU/Disk I/O) INSIDE the transaction (fast)
         trace_id = f"trace_{uuid.uuid4().hex}"
         vector_ids: list[str] = []
         with self.connection:
-            for fact in fact_rows:
-                vector_id = self.index_fact(fact, trace_id=trace_id)
+            for fact, embedding_text, embedding_json in embeddings_to_write:
+                entry = VectorEntryUpsert(
+                    fact_id=fact["fact_id"],
+                    fact_type=fact["fact_type"],
+                    fact_version=fact["fact_version"],
+                    embedding_text=embedding_text,
+                    embedding_hash=sha256_text(embedding_text),
+                    embedding_model_version=self.embedding_model.model_version,
+                    embedding_json=embedding_json,
+                    vector_store_ref=f"sqlite:vector_entries:{fact['fact_id']}",
+                )
+                vector_id = self.vectors.upsert_active(entry)
+                self.events.emit(
+                    trace_id=trace_id,
+                    event_type="vector_entry_upserted",
+                    stage="indexing",
+                    fact_id=fact["fact_id"],
+                    payload={
+                        "vector_id": vector_id,
+                        "fact_type": fact["fact_type"],
+                        "fact_version": fact["fact_version"],
+                        "embedding_model_version": self.embedding_model.model_version,
+                    },
+                )
                 vector_ids.append(vector_id)
 
         return IndexSummary(

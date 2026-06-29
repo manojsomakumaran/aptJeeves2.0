@@ -337,6 +337,8 @@ function IngestionManager() {
   const [uploadMessage, setUploadMessage] = useState<string>('');
   const [isResetting, setIsResetting] = useState(false);
   const [resetStatus, setResetStatus] = useState('');
+  const [isTriggeringExtraction, setIsTriggeringExtraction] = useState(false);
+  const [isTriggeringIndexing, setIsTriggeringIndexing] = useState(false);
 
   const { data: statusData } = useQuery({
     queryKey: ['status', apartment],
@@ -421,6 +423,34 @@ function IngestionManager() {
     }
   };
 
+  const handleTriggerExtraction = async () => {
+    setIsTriggeringExtraction(true);
+    try {
+      const res = await fetch(`/api/${apartment}/extract`, { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to trigger extraction');
+      queryClient.invalidateQueries({ queryKey: ['status', apartment] });
+      queryClient.invalidateQueries({ queryKey: ['logs', apartment] });
+    } catch (err: any) {
+      alert(`Error triggering extraction: ${err.message}`);
+    } finally {
+      setIsTriggeringExtraction(false);
+    }
+  };
+
+  const handleTriggerIndexing = async () => {
+    setIsTriggeringIndexing(true);
+    try {
+      const res = await fetch(`/api/${apartment}/index`, { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to trigger indexing');
+      queryClient.invalidateQueries({ queryKey: ['status', apartment] });
+      queryClient.invalidateQueries({ queryKey: ['logs', apartment] });
+    } catch (err: any) {
+      alert(`Error triggering indexing: ${err.message}`);
+    } finally {
+      setIsTriggeringIndexing(false);
+    }
+  };
+
   if (!apartment) {
     return <div className="flex items-center justify-center h-full text-slate-500">Please select an apartment to manage ingestion.</div>;
   }
@@ -434,13 +464,26 @@ function IngestionManager() {
     ingestStatus = lastImport.messages === 0 ? 'completed-dedup' : 'completed';
   }
 
+  // Check background task activities from logs
+  const lastExtractionEvent = logsData?.events?.find(
+    (e: any) => e.stage === 'extraction' && e.event_type && e.event_type.startsWith('background_task_')
+  );
+  const isExtractionActive = lastExtractionEvent?.event_type === 'background_task_started' || lastExtractionEvent?.event_type === 'background_task_progress';
+
+  const lastIndexingEvent = logsData?.events?.find(
+    (e: any) => e.stage === 'indexing' && e.event_type && e.event_type.startsWith('background_task_')
+  );
+  const isIndexingActive = lastIndexingEvent?.event_type === 'background_task_started' || lastIndexingEvent?.event_type === 'background_task_progress';
+
   // Evaluate Extraction Step
   let extractionStatus = 'idle';
   if (statusData) {
-    if (statusData.messages.total_new > 0) {
+    if (isExtractionActive) {
       extractionStatus = 'in-progress';
     } else if (statusData.messages.total_failed > 0) {
       extractionStatus = 'failed';
+    } else if (statusData.messages.total_new > 0) {
+      extractionStatus = 'pending-idle';
     } else if (statusData.messages.total_extracted > 0) {
       extractionStatus = 'completed';
     }
@@ -463,8 +506,10 @@ function IngestionManager() {
   // Evaluate Indexing Step
   let indexingStatus = 'idle';
   if (statusData) {
-    if (statusData.facts.pending_indexing > 0) {
+    if (isIndexingActive) {
       indexingStatus = 'in-progress';
+    } else if (statusData.facts.pending_indexing > 0) {
+      indexingStatus = 'pending-idle';
     } else if (statusData.vectors.active > 0) {
       indexingStatus = 'completed';
     }
@@ -482,9 +527,31 @@ function IngestionManager() {
     } catch {
       indexingErrorText = lastIndexingErrorEvent.details;
     }
-    if (indexingStatus === 'idle') {
-      indexingStatus = 'failed';
+    if (indexingStatus === 'idle' || indexingStatus === 'completed') {
+      // Show failed status if we have error logs but not currently running
     }
+  }
+
+  // Parse latest extraction progress
+  const latestExtractionProgressEvent = logsData?.events?.find(
+    (e: any) => e.stage === 'extraction' && e.event_type === 'background_task_progress'
+  );
+  let extractionProgressDetails = null;
+  if (latestExtractionProgressEvent) {
+    try {
+      extractionProgressDetails = JSON.parse(latestExtractionProgressEvent.details);
+    } catch {}
+  }
+
+  // Parse latest indexing progress
+  const latestIndexingProgressEvent = logsData?.events?.find(
+    (e: any) => e.stage === 'indexing' && e.event_type === 'background_task_progress'
+  );
+  let indexingProgressDetails = null;
+  if (latestIndexingProgressEvent) {
+    try {
+      indexingProgressDetails = JSON.parse(latestIndexingProgressEvent.details);
+    } catch {}
   }
 
   return (
@@ -578,17 +645,20 @@ function IngestionManager() {
                 </div>
                 <div className="mt-4 pt-3 border-t border-slate-100 text-xs">
                   {isUploading ? (
-                    <div className="text-blue-600 animate-pulse">Uploading file...</div>
+                    <div className="text-blue-600 animate-pulse font-medium">Uploading file<span className="animate-ellipsis"></span></div>
                   ) : lastImport ? (
                     <div>
                       <div className="font-medium text-slate-700">Last Import: {lastImport.batch_id}</div>
+                      <div className="text-slate-700 font-semibold mt-1">
+                        {lastImport.messages} new / {lastImport.total} total messages
+                      </div>
                       {lastImport.messages === 0 ? (
-                        <div className="text-amber-600 mt-1">
-                          Idempotent skip: 0 new messages inserted (already exists).
+                        <div className="text-amber-600 mt-0.5">
+                          Skipped {lastImport.skipped} duplicates (idempotent).
                         </div>
                       ) : (
-                        <div className="text-green-600 mt-1">
-                          Successfully inserted {lastImport.messages} new messages.
+                        <div className="text-green-600 mt-0.5">
+                          Imported successfully ({lastImport.skipped} duplicates skipped).
                         </div>
                       )}
                     </div>
@@ -606,6 +676,7 @@ function IngestionManager() {
               {/* Step 2: Extraction */}
               <div className={`p-4 rounded-xl border flex flex-col justify-between col-span-1 lg:col-span-1.5 transition-all ${
                 extractionStatus === 'in-progress' ? 'border-blue-500 bg-blue-50/30' :
+                extractionStatus === 'pending-idle' ? 'border-amber-300 bg-amber-50/10' :
                 extractionStatus === 'failed' ? 'border-red-300 bg-red-50/20' :
                 extractionStatus === 'completed' ? 'border-green-200 bg-green-50/10' :
                 'border-slate-200 bg-slate-50/20'
@@ -614,12 +685,14 @@ function IngestionManager() {
                   <div className="flex justify-between items-center mb-2">
                     <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Step 2</span>
                     <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                      extractionStatus === 'in-progress' ? 'bg-blue-100 text-blue-800' :
+                      extractionStatus === 'in-progress' ? 'bg-blue-100 text-blue-800 shadow-sm animate-pulse' :
+                      extractionStatus === 'pending-idle' ? 'bg-amber-100 text-amber-800' :
                       extractionStatus === 'failed' ? 'bg-red-100 text-red-800' :
                       extractionStatus === 'completed' ? 'bg-green-100 text-green-800' :
                       'bg-slate-100 text-slate-600'
                     }`}>
-                      {extractionStatus === 'in-progress' ? 'Running' :
+                      {extractionStatus === 'in-progress' ? `Running (${lastExtractionEvent?.trace_id ? '#' + lastExtractionEvent.trace_id.replace('trace_bg_extract_', '').substring(0, 6) : '...' })` :
+                       extractionStatus === 'pending-idle' ? 'Pending (Stopped)' :
                        extractionStatus === 'failed' ? 'Failed' :
                        extractionStatus === 'completed' ? 'Completed' : 'Idle'}
                     </span>
@@ -632,8 +705,27 @@ function IngestionManager() {
                 <div className="mt-4 pt-3 border-t border-slate-100 text-xs">
                   {extractionStatus === 'in-progress' ? (
                     <div>
-                      <div className="text-blue-600 animate-pulse font-medium">Extracting facts...</div>
-                      <div className="text-slate-500 mt-0.5">{statusData.messages.total_new} messages remaining in queue.</div>
+                      <div className="text-blue-600 animate-pulse font-medium">Extracting facts<span className="animate-ellipsis"></span></div>
+                      {extractionProgressDetails && (
+                        <div className="text-slate-700 font-semibold mt-1">
+                          {extractionProgressDetails.facts_extracted_so_far} facts extracted in current run
+                        </div>
+                      )}
+                      <div className="text-slate-500 mt-1 flex flex-col gap-0.5">
+                        <div>Queue: <span className="font-semibold text-slate-700">{statusData.messages.total_new}</span> remaining.</div>
+                        <div>Processed: <span className="font-semibold text-green-700">{statusData.messages.total_extracted}</span> successfully.</div>
+                      </div>
+                    </div>
+                  ) : extractionStatus === 'pending-idle' ? (
+                    <div>
+                      <div className="text-slate-600 font-medium">Queue has {statusData.messages.total_new} pending messages.</div>
+                      <button 
+                        onClick={handleTriggerExtraction} 
+                        disabled={isTriggeringExtraction || isExtractionActive}
+                        className="mt-2 w-full bg-blue-600 text-white py-1.5 px-2 rounded hover:bg-blue-700 font-semibold disabled:bg-slate-100 disabled:text-slate-400 disabled:border disabled:border-slate-200 disabled:cursor-not-allowed text-[11px] transition-colors"
+                      >
+                        {isTriggeringExtraction ? <span>Starting task<span className="animate-ellipsis"></span></span> : 'Trigger Fact Extraction'}
+                      </button>
                     </div>
                   ) : extractionStatus === 'failed' ? (
                     <div>
@@ -643,13 +735,24 @@ function IngestionManager() {
                           {extractionErrorText}
                         </div>
                       )}
-                      <button 
-                        onClick={handleResetFailed} 
-                        disabled={isResetting}
-                        className="mt-2 w-full bg-red-600 text-white py-1 px-2 rounded hover:bg-red-700 font-medium disabled:opacity-50 text-[10px]"
-                      >
-                        {isResetting ? 'Resetting...' : 'Retry Failed Extractions'}
-                      </button>
+                      <div className="flex flex-col gap-1.5 mt-2">
+                        <button 
+                          onClick={handleResetFailed} 
+                          disabled={isResetting || isExtractionActive}
+                          className="w-full bg-red-600 text-white py-1 px-2 rounded hover:bg-red-700 font-medium disabled:bg-slate-100 disabled:text-slate-400 disabled:border disabled:border-slate-200 disabled:cursor-not-allowed text-[10px]"
+                        >
+                          {isResetting ? 'Resetting...' : 'Retry Failed Extractions'}
+                        </button>
+                        {statusData.messages.total_new > 0 && (
+                          <button 
+                            onClick={handleTriggerExtraction} 
+                            disabled={isTriggeringExtraction || isExtractionActive}
+                            className="w-full bg-blue-600 text-white py-1 px-2 rounded hover:bg-blue-700 font-semibold disabled:bg-slate-100 disabled:text-slate-400 disabled:border disabled:border-slate-200 disabled:cursor-not-allowed text-[10px] transition-colors"
+                          >
+                            {isTriggeringExtraction ? <span>Resuming task<span className="animate-ellipsis"></span></span> : 'Resume Extraction on Remaining'}
+                          </button>
+                        )}
+                      </div>
                       {resetStatus && <div className="text-[10px] mt-1 text-slate-600">{resetStatus}</div>}
                     </div>
                   ) : extractionStatus === 'completed' ? (
@@ -670,6 +773,7 @@ function IngestionManager() {
               {/* Step 3: Indexing */}
               <div className={`p-4 rounded-xl border flex flex-col justify-between col-span-1 lg:col-span-1.5 transition-all ${
                 indexingStatus === 'in-progress' ? 'border-blue-500 bg-blue-50/30' :
+                indexingStatus === 'pending-idle' ? 'border-amber-300 bg-amber-50/10' :
                 indexingStatus === 'failed' ? 'border-red-300 bg-red-50/20' :
                 indexingStatus === 'completed' ? 'border-green-200 bg-green-50/10' :
                 'border-slate-200 bg-slate-50/20'
@@ -678,12 +782,14 @@ function IngestionManager() {
                   <div className="flex justify-between items-center mb-2">
                     <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Step 3</span>
                     <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                      indexingStatus === 'in-progress' ? 'bg-blue-100 text-blue-800' :
+                      indexingStatus === 'in-progress' ? 'bg-blue-100 text-blue-800 shadow-sm animate-pulse' :
+                      indexingStatus === 'pending-idle' ? 'bg-amber-100 text-amber-800' :
                       indexingStatus === 'failed' ? 'bg-red-100 text-red-800' :
                       indexingStatus === 'completed' ? 'bg-green-100 text-green-800' :
                       'bg-slate-100 text-slate-600'
                     }`}>
-                      {indexingStatus === 'in-progress' ? 'Running' :
+                      {indexingStatus === 'in-progress' ? `Running (${lastIndexingEvent?.trace_id ? '#' + lastIndexingEvent.trace_id.replace('trace_bg_index_', '').substring(0, 6) : '...' })` :
+                       indexingStatus === 'pending-idle' ? 'Pending (Stopped)' :
                        indexingStatus === 'failed' ? 'Failed' :
                        indexingStatus === 'completed' ? 'Completed' : 'Idle'}
                     </span>
@@ -696,8 +802,27 @@ function IngestionManager() {
                 <div className="mt-4 pt-3 border-t border-slate-100 text-xs">
                   {indexingStatus === 'in-progress' ? (
                     <div>
-                      <div className="text-blue-600 animate-pulse font-medium">Embedding facts...</div>
-                      <div className="text-slate-500 mt-0.5">{statusData.facts.pending_indexing} facts remaining in queue.</div>
+                      <div className="text-blue-600 animate-pulse font-medium">Embedding facts<span className="animate-ellipsis"></span></div>
+                      {indexingProgressDetails && (
+                        <div className="text-slate-700 font-semibold mt-1">
+                          {indexingProgressDetails.vectors_indexed_so_far} vectors indexed in current run
+                        </div>
+                      )}
+                      <div className="text-slate-500 mt-1 flex flex-col gap-0.5">
+                        <div>Queue: <span className="font-semibold text-slate-700">{statusData.facts.pending_indexing}</span> remaining.</div>
+                        <div>Processed: <span className="font-semibold text-green-700">{statusData.vectors.active}</span> successfully.</div>
+                      </div>
+                    </div>
+                  ) : indexingStatus === 'pending-idle' ? (
+                    <div>
+                      <div className="text-slate-600 font-medium">Queue has {statusData.facts.pending_indexing} pending facts.</div>
+                      <button 
+                        onClick={handleTriggerIndexing} 
+                        disabled={isTriggeringIndexing || isIndexingActive}
+                        className="mt-2 w-full bg-blue-600 text-white py-1.5 px-2 rounded hover:bg-blue-700 font-semibold disabled:bg-slate-100 disabled:text-slate-400 disabled:border disabled:border-slate-200 disabled:cursor-not-allowed text-[11px] transition-colors"
+                      >
+                        {isTriggeringIndexing ? <span>Starting task<span className="animate-ellipsis"></span></span> : 'Trigger Vector Indexing'}
+                      </button>
                     </div>
                   ) : indexingStatus === 'failed' ? (
                     <div>
@@ -706,6 +831,15 @@ function IngestionManager() {
                         <div className="mt-1 p-1.5 bg-red-50 text-red-700 border border-red-100 rounded text-[10px] break-words whitespace-pre-wrap max-h-16 overflow-y-auto font-mono">
                           {indexingErrorText}
                         </div>
+                      )}
+                      {statusData.facts.pending_indexing > 0 && (
+                        <button 
+                          onClick={handleTriggerIndexing} 
+                          disabled={isTriggeringIndexing || isIndexingActive}
+                          className="mt-2 w-full bg-blue-600 text-white py-1.5 px-2 rounded hover:bg-blue-700 font-semibold disabled:bg-slate-100 disabled:text-slate-400 disabled:border disabled:border-slate-200 disabled:cursor-not-allowed text-[10px] transition-colors"
+                        >
+                          {isTriggeringIndexing ? <span>Resuming task<span className="animate-ellipsis"></span></span> : 'Resume Indexing on Remaining'}
+                        </button>
                       )}
                     </div>
                   ) : indexingStatus === 'completed' ? (
