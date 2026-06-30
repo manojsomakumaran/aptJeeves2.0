@@ -31,15 +31,36 @@ FACT STRUCTURE:
   "privacy_status_hint": "public_to_residents" | "restricted_resident_pii" | "restricted_unknown_contact" | "restricted_sensitive" | "needs_review",
   "source_message_ids": ["msg_id1", "msg_id2"],  // list of actual message IDs from input
   "sanitized_snippets": ["relevant text snippet 1", "relevant text snippet 2"],
-  "service_contact": {  // for service_contact fact_type only
+  "service_contact": {  // Include ONLY if fact_type is "service_contact", otherwise null
     "service_type": "plumber",
-    "contact_methods": [{"type": "phone", "value_placeholder": "PHONE_1"}]
+    "contact_methods": [{"type": "phone" | "email" | "website" | "other", "value_placeholder": "PHONE_1"}]
   },
-  "process_info": {...},  // for process_info fact_type
-  "facility_info": {...}   // for facility_info fact_type
+  "process_info": {  // Include ONLY if fact_type is "process_info", otherwise null
+    "process_name": "Name of the process",
+    "category": "category (string or null)",
+    "provider_or_authority": "authority name (string or null)",
+    "steps": ["Step 1", "Step 2"],  // array of strings, empty array if none
+    "required_documents": ["Doc 1"],  // array of strings, empty array if none
+    "fees": ["Fee 1"],  // array of strings, empty array if none
+    "locations_or_portals": ["Location 1"],  // array of strings, empty array if none
+    "deadlines": ["Deadline 1"],  // array of strings, empty array if none
+    "caveats": "caveats (string or null)",
+    "staleness_risk": "low" | "medium" | "high",  // default "medium"
+    "official_verification_status": "verified" | "not_verified"  // default "not_verified"
+  },
+  "facility_info": {  // Include ONLY if fact_type is "facility_info", otherwise null
+    "facility_name": "Name of the facility",
+    "info_type": "general" | "rules" | "booking" | "hours",  // default "general"
+    "location_hint": "location (string or null)",
+    "availability": "hours or availability (string or null)",
+    "rules_or_steps": ["Rule 1"],  // array of strings, empty array if none
+    "caveats": "caveats (string or null)"
+  }
 }
 
 CRITICAL RULES:
+- Extract ONLY factual data explicitly mentioned in the input messages. Do NOT assume, extrapolate, or hallucinate.
+- If an optional field (marked as "or null") or list field is not explicitly present in the input, set it to null or an empty list [] respectively. Do NOT populate them with guessed or placeholder info.
 - source_message_ids MUST be a list of message_id strings from the input messages
 - confidence MUST be a decimal between 0 and 1 (e.g., 0.85, NOT 85 or 100)
 - Use only input messages for source_message_ids - never invent IDs
