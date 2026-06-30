@@ -94,7 +94,11 @@ def test_fake_extraction_marks_no_extractable_info(tmp_path: Path) -> None:
     connection = connect(tmp_path / "aptjeeves.sqlite3")
     apply_migrations(connection)
     export_path = tmp_path / "chat.txt"
-    export_path.write_text("16/04/26, 9:30 PM - Alice: Thanks everyone.", encoding="utf-8")
+    export_path.write_text(
+        "16/04/26, 9:30 PM - Alice: Thanks everyone.\n"
+        "16/04/26, 9:31 PM - Bob: This is a longer message about general community topics that contains no plumber or gas connection details.",
+        encoding="utf-8"
+    )
     ChatIngestionService(connection).ingest(
         IngestRequest(platform="whatsapp", file_path=export_path, chat_name="Main")
     )
@@ -103,7 +107,13 @@ def test_fake_extraction_marks_no_extractable_info(tmp_path: Path) -> None:
 
     assert result.fact_ids == []
     assert result.extraction_failures == 0
-    assert RawMessageRepository(connection).list_all()[0]["processing_status"] == "no_extractable_info"
+    
+    rows = RawMessageRepository(connection).list_all()
+    noise_row = [r for r in rows if "Thanks everyone" in r["sanitized_text"]][0]
+    valid_row = [r for r in rows if "longer message" in r["sanitized_text"]][0]
+    
+    assert noise_row["processing_status"] == "skipped_noise_filter"
+    assert valid_row["processing_status"] == "no_extractable_info"
 
 
 def test_cli_extract_pending_uses_fake_extractor(tmp_path: Path, capsys, monkeypatch) -> None:

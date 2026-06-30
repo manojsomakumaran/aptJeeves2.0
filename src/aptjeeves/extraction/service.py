@@ -148,7 +148,7 @@ class ExtractionService:
             logger.info(f"Filtered out {len(noise_ids)} noise messages from LLM extraction.")
             with self.connection:
                 for msg_id in noise_ids:
-                    self.raw_messages.mark_processing_status(msg_id, "no_extractable_info")
+                    self.raw_messages.mark_processing_status(msg_id, "skipped_noise_filter")
 
         by_batch: dict[str, list[sqlite3.Row]] = defaultdict(list)
         for row in valid_rows:
