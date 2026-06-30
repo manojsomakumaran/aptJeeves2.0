@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import sqlite3
 import logging
 import math
@@ -135,8 +135,23 @@ class ExtractionService:
                 limit_applied=limit,
             )
 
-        by_batch: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        # Pre-filter noise messages
+        valid_rows = []
+        noise_ids = []
         for row in all_rows:
+            if _is_noise_message(row["sanitized_text"]):
+                noise_ids.append(row["message_id"])
+            else:
+                valid_rows.append(row)
+
+        if noise_ids:
+            logger.info(f"Filtered out {len(noise_ids)} noise messages from LLM extraction.")
+            with self.connection:
+                for msg_id in noise_ids:
+                    self.raw_messages.mark_processing_status(msg_id, "no_extractable_info")
+
+        by_batch: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        for row in valid_rows:
             by_batch[row["import_batch_id"]].append(row)
 
         all_fact_ids: list[str] = []
@@ -144,7 +159,7 @@ class ExtractionService:
 
         for batch_id, batch_rows in by_batch.items():
             batch_failures = 0
-            for chunk_rows in _chunk_rows(batch_rows, chunk_size=25, overlap=5):
+            for chunk_rows in _chunk_rows(batch_rows, chunk_size=75, overlap=5):
                 summary = self.extract_rows(chunk_rows)
                 all_fact_ids.extend(summary.fact_ids)
                 batch_failures += summary.extraction_failures
@@ -433,3 +448,33 @@ def _chunk_rows(rows: list[sqlite3.Row], *, chunk_size: int, overlap: int = 0) -
         if index + chunk_size >= len(rows):
             break
     return chunks
+
+
+def _is_noise_message(text: str) -> bool:
+    """Determine if a message is conversational noise and has no community facts."""
+    import re
+    if not text:
+        return True
+    
+    cleaned = text.strip().lower()
+    if not cleaned:
+        return True
+        
+    # Check length: extremely short messages are almost always noise
+    if len(cleaned) < 12:
+        return True
+        
+    # Check for common non-informational phrases/words
+    noise_patterns = [
+        r"^(hello|hi|hey|bye|good morning|good afternoon|good evening|good night|tc|take care)\b",
+        r"^(ok|okay|k|thanks|thank you|thx|tq|y|n|yes|no|cool|sure|fine|noted|got it|acknowledged)\b",
+        r"^(congratulations|congrats|happy birthday|hbd)\b",
+        r"^(lol|haha|lmao|rofl)\b",
+    ]
+    
+    # If the message matches a noise pattern, it's noise
+    for pattern in noise_patterns:
+        if re.match(pattern, cleaned):
+            return True
+            
+    return False

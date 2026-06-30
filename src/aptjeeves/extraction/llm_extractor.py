@@ -66,6 +66,96 @@ CRITICAL RULES:
 - Use only input messages for source_message_ids - never invent IDs
 - Preserve placeholder values like PHONE_1, EMAIL_1 exactly as provided
 - Do not include facts with confidence < 0.1
+
+FEW-SHOT EXAMPLES FOR GUIDANCE:
+
+Example 1 (service_contact and facility_info):
+Input:
+{"messages": [
+  {"message_id": "msg_1", "sender_hash": "user_a", "sanitized_text": "Hey everyone, if you need a plumber, call Alice at PHONE_1. She fixed my leak today."},
+  {"message_id": "msg_2", "sender_hash": "user_b", "sanitized_text": "Is the swimming pool open today?"},
+  {"message_id": "msg_3", "sender_hash": "user_c", "sanitized_text": "Yes, pool is open from 8am to 8pm daily. You need to book slot on portal."}
+]}
+Output:
+{
+  "facts": [
+    {
+      "fact_type": "service_contact",
+      "identity_key_hint": "plumber_alice",
+      "title": "Plumber Alice",
+      "summary": "Alice is a plumber recommended by residents for fixing leaks.",
+      "confidence": 0.95,
+      "privacy_status_hint": "public_to_residents",
+      "source_message_ids": ["msg_1"],
+      "sanitized_snippets": ["if you need a plumber, call Alice at PHONE_1"],
+      "service_contact": {
+        "service_type": "plumber",
+        "contact_methods": [{"type": "phone", "value_placeholder": "PHONE_1"}]
+      },
+      "process_info": null,
+      "facility_info": null
+    },
+    {
+      "fact_type": "facility_info",
+      "identity_key_hint": "swimming_pool",
+      "title": "Swimming Pool Booking and Hours",
+      "summary": "The community swimming pool is open daily from 8am to 8pm. Slot booking is required via the resident portal.",
+      "confidence": 0.9,
+      "privacy_status_hint": "public_to_residents",
+      "source_message_ids": ["msg_2", "msg_3"],
+      "sanitized_snippets": ["pool is open from 8am to 8pm daily", "You need to book slot on portal"],
+      "service_contact": null,
+      "process_info": null,
+      "facility_info": {
+        "facility_name": "Swimming Pool",
+        "info_type": "booking",
+        "location_hint": null,
+        "availability": "8am to 8pm daily",
+        "rules_or_steps": ["Slot booking required on the resident portal"],
+        "caveats": null
+      }
+    }
+  ],
+  "warnings": []
+}
+
+Example 2 (process_info):
+Input:
+{"messages": [
+  {"message_id": "msg_4", "sender_hash": "user_a", "sanitized_text": "How do we get a guest parking permit?"},
+  {"message_id": "msg_5", "sender_hash": "user_b", "sanitized_text": "Fill the guest permit form in the lobby, pay $10, and submit it to the security desk. It takes 1 day."}
+]}
+Output:
+{
+  "facts": [
+    {
+      "fact_type": "process_info",
+      "identity_key_hint": "guest_parking_permit",
+      "title": "Guest Parking Permit Process",
+      "summary": "Process to obtain a guest parking permit by filling a form in the lobby, paying a fee, and submitting it to security.",
+      "confidence": 0.95,
+      "privacy_status_hint": "public_to_residents",
+      "source_message_ids": ["msg_4", "msg_5"],
+      "sanitized_snippets": ["Fill the guest permit form in the lobby, pay $10, and submit it to the security desk. It takes 1 day."],
+      "service_contact": null,
+      "process_info": {
+        "process_name": "Guest Parking Permit",
+        "category": "Parking",
+        "provider_or_authority": "Security Desk",
+        "steps": ["Fill the guest permit form in the lobby", "Pay $10 fee", "Submit form to the security desk"],
+        "required_documents": ["Guest permit form"],
+        "fees": ["$10"],
+        "locations_or_portals": ["Lobby", "Security desk"],
+        "deadlines": [],
+        "caveats": "Processing takes 1 day",
+        "staleness_risk": "low",
+        "official_verification_status": "not_verified"
+      },
+      "facility_info": null
+    }
+  ],
+  "warnings": []
+}
 """
 
 
