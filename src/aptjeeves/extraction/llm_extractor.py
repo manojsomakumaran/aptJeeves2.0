@@ -61,7 +61,7 @@ FACT STRUCTURE:
 CRITICAL RULES:
 - Extract ONLY factual data explicitly mentioned in the input messages. Do NOT assume, extrapolate, or hallucinate.
 - If an optional field (marked as "or null") or list field is not explicitly present in the input, set it to null or an empty list [] respectively. Do NOT populate them with guessed or placeholder info.
-- source_message_ids MUST be a list of message_id strings from the input messages
+- source_message_ids MUST be a list of the exact message_id strings from the input messages. Do NOT use the message_fingerprint values or prepend 'msg_' to them.
 - confidence MUST be a decimal between 0 and 1 (e.g., 0.85, NOT 85 or 100)
 - Use only input messages for source_message_ids - never invent IDs
 - Preserve placeholder values like PHONE_1, EMAIL_1 exactly as provided
