@@ -13,6 +13,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langfuse.decorators import observe, langfuse_context
 
+from aptjeeves.attachments.config import AttachmentConfig
+from aptjeeves.attachments.repository import AttachmentRepository
+from aptjeeves.attachments.service import AttachmentService
 from aptjeeves.config import load_settings, resolve_db_path, Settings
 from aptjeeves.storage.db import connect, apply_migrations
 from aptjeeves.storage.repositories import RawMessageRepository, CanonicalFactRepository, VectorEntryRepository
@@ -173,10 +176,17 @@ def get_processing_status(apartment: str, settings: Settings = Depends(get_setti
     """Fetch the current counts for the UI progress bars and advanced settings."""
     db_path = resolve_db_path(settings=settings, explicit_db_path=None, apartment=apartment)
     conn = connect(db_path)
+    apply_migrations(conn)
     try:
         raw_repo = RawMessageRepository(conn)
         fact_repo = CanonicalFactRepository(conn)
         vector_repo = VectorEntryRepository(conn)
+        attachment_repo = AttachmentRepository(conn)
+        attachment_counts = attachment_repo.count_by_status()
+        attachment_ocr = {
+            **attachment_repo.ocr_counts(),
+            "backend": AttachmentConfig.from_env().ocr_backend,
+        }
         
         # Fetch recent imports from the database
         recent_imports = conn.execute(
@@ -209,6 +219,8 @@ def get_processing_status(apartment: str, settings: Settings = Depends(get_setti
                 "total_failed": raw_repo.count_by_processing_status("failed"),
                 "total_extracted": raw_repo.count_by_processing_status("extracted"),
             },
+            "attachments": attachment_counts,
+            "attachment_ocr": attachment_ocr,
             "facts": {
                 "total": fact_repo.connection.execute("SELECT COUNT(*) as count FROM canonical_facts").fetchone()["count"],
                 "pending_indexing": fact_repo.count_facts_for_indexing(embedding_model_version=embedding_model_version)
@@ -270,7 +282,12 @@ def reset_failed_messages(apartment: str, settings: Settings = Depends(get_setti
         repo = RawMessageRepository(conn)
         with conn:
             count = repo.reset_failed()
-        return ActionResponse(status="success", message=f"Reset {count} failed messages.", details={"count": count})
+            attachments_reset = AttachmentRepository(conn).reset_failed()
+        return ActionResponse(
+            status="success",
+            message=f"Reset {count} failed messages and {attachments_reset} failed attachments.",
+            details={"count": count, "attachments_reset": attachments_reset},
+        )
     finally:
         conn.close()
 
@@ -313,11 +330,21 @@ async def upload_chat_export(
         apply_migrations(conn)
         try:
             service = ChatIngestionService(conn)
+            # Attachments are resolved from the explicit folder when given,
+            # otherwise from the uploaded files. They are copied into the
+            # apartment's spool during ingest, before the temp dir is removed.
+            upload_dir = Path(attachment_folder) if attachment_folder else temp_dir
             summary = service.ingest(
-                IngestRequest(platform=platform.lower(), file_path=primary_file_path, default_timezone=settings.default_timezone)
+                IngestRequest(
+                    platform=platform.lower(),
+                    file_path=primary_file_path,
+                    default_timezone=settings.default_timezone,
+                    upload_dir=upload_dir,
+                )
             )
             
-            # Automatically trigger extraction and indexing in the background
+            # Automatically trigger attachments, extraction and indexing in the background
+            background_tasks.add_task(run_attachments_task, db_path, settings, 50)
             background_tasks.add_task(run_extraction_task, db_path, settings, 100)
             background_tasks.add_task(run_indexing_task, db_path, settings, 100)
             
@@ -453,6 +480,37 @@ def get_recent_logs(apartment: str, limit: int = 100, settings: Settings = Depen
         conn.close()
 
 # --- Routes: Background Tasks (Extraction & Indexing) ---
+
+def run_attachments_task(db_path: Path, settings: Settings, limit: int = 50):
+    """Background task to extract text from pending attachments."""
+    conn = connect(db_path)
+    events = ObservabilityService(conn)
+    trace_id = f"trace_bg_attachments_{uuid.uuid4().hex}"
+    try:
+        events.emit(trace_id=trace_id, event_type="background_task_started", stage="attachments", payload={"task": "run_attachments_task", "limit": limit})
+        service = AttachmentService(conn)
+        total_segments = 0
+        while True:
+            summary = service.process_pending(limit=limit)
+            total_segments += summary.segments_inserted
+            if summary.processed == 0 or summary.remaining_pending == 0:
+                break
+        events.emit(trace_id=trace_id, event_type="background_task_completed", stage="attachments", status="success", payload={"task": "run_attachments_task", "segments_inserted": total_segments})
+    except Exception as e:
+        logger.error(f"Background attachments task failed: {e}", exc_info=True)
+        events.emit(trace_id=trace_id, event_type="background_task_failed", stage="attachments", status="error", payload={"task": "run_attachments_task", "error": str(e)})
+    finally:
+        conn.close()
+
+
+@app.post("/api/{apartment}/attachments/process", response_model=ActionResponse)
+def trigger_attachments(apartment: str, background_tasks: BackgroundTasks, settings: Settings = Depends(get_settings)):
+    """Start a background job to extract text from pending attachments, then facts."""
+    db_path = resolve_db_path(settings=settings, explicit_db_path=None, apartment=apartment)
+    background_tasks.add_task(run_attachments_task, db_path, settings, 50)
+    background_tasks.add_task(run_extraction_task, db_path, settings, 100)
+    return ActionResponse(status="success", message="Attachment processing background task started.")
+
 
 @observe(name="run_extraction_task")
 def run_extraction_task(db_path: Path, settings: Settings, limit: int = 100):

@@ -17,6 +17,10 @@ class MessageForExtraction:
     sent_at_utc: str
     sender_hash: str
     sanitized_text: str
+    # Attachment-derived segments carry their origin; chat messages keep defaults.
+    source_kind: str = "chat"
+    attachment_name: str | None = None
+    segment_label: str | None = None
 
 
 @dataclass(frozen=True)

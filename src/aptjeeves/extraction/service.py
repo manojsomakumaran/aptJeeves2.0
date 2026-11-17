@@ -20,6 +20,9 @@ from aptjeeves.storage.models import (
 from aptjeeves.storage.repositories import CanonicalFactRepository, ImportRunRepository, RawMessageRepository
 logger = logging.getLogger(__name__)
 
+# Character budget for one document-extraction call (segments are ~3.5k chars).
+ATTACHMENT_EXTRACTION_CHARS = 8000
+
 
 class ExtractionService:
     """Validates extracted facts and upserts them into canonical storage."""
@@ -135,14 +138,24 @@ class ExtractionService:
                 limit_applied=limit,
             )
 
-        # Pre-filter noise messages
-        valid_rows = []
+        # Pre-filter noise; attachment segments use a lighter rule so document
+        # text that happens to start with "No ..." or "Yes ..." is not dropped.
+        chat_rows = []
+        segment_rows = []
         noise_ids = []
         for row in all_rows:
-            if _is_noise_message(row["sanitized_text"]):
+            is_segment = _row_value(row, "source_kind", "chat") == "attachment"
+            is_noise = (
+                _is_noise_segment(row["sanitized_text"])
+                if is_segment
+                else _is_noise_message(row["sanitized_text"])
+            )
+            if is_noise:
                 noise_ids.append(row["message_id"])
+            elif is_segment:
+                segment_rows.append(row)
             else:
-                valid_rows.append(row)
+                chat_rows.append(row)
 
         if noise_ids:
             logger.info(f"Filtered out {len(noise_ids)} noise messages from LLM extraction.")
@@ -151,7 +164,7 @@ class ExtractionService:
                     self.raw_messages.mark_processing_status(msg_id, "skipped_noise_filter")
 
         by_batch: dict[str, list[sqlite3.Row]] = defaultdict(list)
-        for row in valid_rows:
+        for row in chat_rows:
             by_batch[row["import_batch_id"]].append(row)
 
         all_fact_ids: list[str] = []
@@ -169,6 +182,24 @@ class ExtractionService:
                     self.import_runs.increment_extraction_failures(
                         batch_id, batch_failures
                     )
+
+        # Document segments are sent in their own calls, never mixed with chat,
+        # and chunked by size (a document is far denser than a chat message).
+        segments_by_attachment: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        for row in segment_rows:
+            segments_by_attachment[row["attachment_id"] or row["message_id"]].append(row)
+        failures_by_batch: dict[str, int] = defaultdict(int)
+        for doc_rows in segments_by_attachment.values():
+            doc_rows.sort(key=lambda r: (r["source_offset"] or 0, r["message_id"]))
+            for chunk_rows in _chunk_rows_by_chars(doc_rows, max_chars=ATTACHMENT_EXTRACTION_CHARS):
+                summary = self.extract_rows(chunk_rows)
+                all_fact_ids.extend(summary.fact_ids)
+                total_failures += summary.extraction_failures
+                failures_by_batch[chunk_rows[0]["import_batch_id"]] += summary.extraction_failures
+        for batch_id, failures in failures_by_batch.items():
+            if failures > 0:
+                with self.connection:
+                    self.import_runs.increment_extraction_failures(batch_id, failures)
 
         return ExtractionSummary(
             fact_ids=all_fact_ids,
@@ -233,7 +264,26 @@ def _message_for_extraction(row: sqlite3.Row) -> MessageForExtraction:
         sent_at_utc=row["sent_at_utc"],
         sender_hash=row["sender_hash"],
         sanitized_text=row["sanitized_text"],
+        source_kind=_row_value(row, "source_kind", "chat"),
+        attachment_name=_attachment_name(row),
+        segment_label=_row_value(row, "segment_label", None),
     )
+
+
+def _row_value(row: sqlite3.Row, key: str, default: Any) -> Any:
+    """Read a column that may be missing on rows from older query shapes."""
+
+    return row[key] if key in row.keys() else default
+
+
+def _attachment_name(row: sqlite3.Row) -> str | None:
+    """Return the (already redacted) attachment name for attachment segments."""
+
+    if _row_value(row, "source_kind", "chat") != "attachment":
+        return None
+    source_file = row["source_file"] or ""
+    prefix = "attachment:"
+    return source_file[len(prefix):] if source_file.startswith(prefix) else source_file
 
 
 def _evidence_for_fact(
@@ -478,3 +528,27 @@ def _is_noise_message(text: str) -> bool:
             return True
             
     return False
+
+
+def _is_noise_segment(text: str) -> bool:
+    """Attachment segments are noise only when they carry almost no text."""
+
+    return not text or len(text.strip()) < 20
+
+
+def _chunk_rows_by_chars(rows: list[sqlite3.Row], *, max_chars: int) -> list[list[sqlite3.Row]]:
+    """Group consecutive rows so each group stays within a character budget."""
+
+    chunks: list[list[sqlite3.Row]] = []
+    current: list[sqlite3.Row] = []
+    size = 0
+    for row in rows:
+        length = len(row["sanitized_text"])
+        if current and size + length > max_chars:
+            chunks.append(current)
+            current, size = [], 0
+        current.append(row)
+        size += length
+    if current:
+        chunks.append(current)
+    return chunks

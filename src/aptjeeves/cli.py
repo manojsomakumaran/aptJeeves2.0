@@ -7,6 +7,8 @@ import re
 import sys
 from pathlib import Path
 
+from aptjeeves.attachments.repository import AttachmentRepository
+from aptjeeves.attachments.service import AttachmentService
 from aptjeeves.config import Settings, load_settings, resolve_db_path
 from aptjeeves.extraction.service import ExtractionService
 from aptjeeves.indexing.indexer import VectorIndexingService
@@ -54,7 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--upload-dir",
         default=None,
         type=Path,
-        help="Directory containing uploaded attachments referenced by the export (e.g. .vcf files).",
+        help=(
+            "Directory containing attachments referenced by the export "
+            "(.vcf contacts plus PDF/DOCX/XLSX/CSV/TXT documents)."
+        ),
     )
 
     status = subparsers.add_parser("import-status", help="Show an import summary.")
@@ -84,9 +89,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extract.add_argument("--limit", type=int, default=100)
 
+    process_attachments = subparsers.add_parser(
+        "process-attachments",
+        help="Extract text from pending attachments and queue the segments for extraction.",
+    )
+    process_attachments.add_argument(
+        "--apartment",
+        default=None,
+        help="Apartment chatbot name used to select the database.",
+    )
+    process_attachments.add_argument("--limit", type=int, default=50)
+
     reset_failed = subparsers.add_parser(
         "reset-failed",
-        help="Reset all 'failed' raw messages back to 'new' for re-extraction.",
+        help="Reset all 'failed' raw messages and attachments for another attempt.",
     )
     reset_failed.add_argument(
         "--apartment",
@@ -260,7 +276,14 @@ def main(argv: list[str] | None = None) -> int:
         repo = RawMessageRepository(connection)
         with connection:
             count = repo.reset_failed()
+            attachments_reset = AttachmentRepository(connection).reset_failed()
 
+        if attachments_reset > 0:
+            print(
+                f"Reset {attachments_reset} failed attachments back to 'pending'. "
+                "Run process-attachments to retry them.",
+                file=sys.stderr,
+            )
         if count > 0:
             print(f"Reset {count} failed messages back to 'new'. You can now run extract-pending.", file=sys.stderr)
         else:
@@ -271,6 +294,29 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "status": "completed",
                     "messages_reset": count,
+                    "attachments_reset": attachments_reset,
+                    "db_path": str(db_path),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "process-attachments":
+        service = AttachmentService(connection)
+        summary = service.process_pending(limit=args.limit)
+        print(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "processed": summary.processed,
+                    "text_extracted": summary.text_extracted,
+                    "segments_inserted": summary.segments_inserted,
+                    "no_text": summary.no_text,
+                    "skipped_sensitive": summary.skipped_sensitive,
+                    "failed": summary.failed,
+                    "remaining_pending": summary.remaining_pending,
+                    "attachment_status_counts": service.attachments.count_by_status(),
                     "db_path": str(db_path),
                 },
                 indent=2,

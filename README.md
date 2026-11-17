@@ -158,8 +158,65 @@ Other optional flags for `ingest`:
 ```text
 --timezone TZ      Timezone for parsing timestamps (e.g., "UTC", "America/New_York")
 --date-order FMT   Order for ambiguous dates like 01/02/03 (DMY or MDY, default: DMY)
---upload-dir PATH  Directory with uploaded attachments (e.g., .vcf files)
+--upload-dir PATH  Directory with attachments (.vcf contacts and PDF/DOCX/XLSX/CSV/TXT documents)
 ```
+
+## WhatsApp Attachments (PDF, Word, Excel, CSV, Text)
+
+Documents shared in a WhatsApp chat are read and turned into `service_contact`, `process_info` and
+`facility_info` facts, the same as chat text. Install the optional parsers first:
+
+```powershell
+python -m pip install -e ".[attachments]"
+```
+
+Export the chat **with media** and keep the files in one folder next to the export:
+
+```powershell
+$env:PYTHONPATH = ".\src"
+python -m aptjeeves.cli ingest --apartment "Green Acres" --platform whatsapp `
+  --file ".\exports\WhatsApp Chat with Apartment Main.txt" --upload-dir ".\exports"
+python -m aptjeeves.cli process-attachments --apartment "Green Acres"
+python -m aptjeeves.cli extract-pending --apartment "Green Acres"
+python -m aptjeeves.cli index-facts --apartment "Green Acres"
+```
+
+The web upload does all of this automatically (attachments -> extraction -> indexing).
+
+How it works:
+
+```text
+ingest              finds "<file> (file attached)" lines, hashes each file, copies it into
+                    data/apartments/<slug>/attachments/<sha256>.<ext>, and records it as 'pending'
+process-attachments reads text locally (PDF text layer, DOCX, XLSX, CSV, TXT), skips sensitive
+                    documents, redacts the text, and stores page/section segments as raw messages
+extract-pending     extracts facts from those segments (separate LLM calls from chat)
+```
+
+- The same file forwarded many times is processed once; re-importing the full history is safe.
+- File type is decided by file content, not extension. Parsers run in a child process with a timeout.
+- **Sensitive documents are skipped entirely** (no text stored): bills/invoices, rent or lease
+  agreements, ID numbers (PAN, Aadhaar), bank/card details, and documents listing many flat numbers.
+  The reason category is recorded in `attachments.status_reason`.
+- **Local OCR (optional).** Install `pip install ".[ocr]"` and set `APTJEEVES_ATTACHMENT_OCR_BACKEND=local`
+  to read images (JPG/PNG/WEBP) and scanned PDF pages. OCR runs on this machine only (RapidOCR); no image
+  is sent to any provider. Tiny images (icons/stickers), low-confidence lines and images with almost no text
+  (photos, memes, selfies) are dropped and marked `no_text`. Without OCR, images are saved and scanned PDFs
+  are marked `no_text`; turning OCR on later re-queues them automatically on the next
+  `process-attachments`. Video and audio are ignored.
+- **Original files are kept** in the attachments spool by default. To delete a file once its text was
+  extracted (or it was skipped as sensitive), set `APTJEEVES_ATTACHMENT_RETENTION=delete_after_extract`.
+  Images and scanned PDFs are kept until OCR has been attempted on them.
+- Failed attachments (corrupt, password-protected, timeout) are retried with `reset-failed` followed by
+  `process-attachments`.
+
+Optional limits: `APTJEEVES_ATTACHMENT_MAX_BYTES` (20 MB), `APTJEEVES_ATTACHMENT_MAX_PAGES` (50),
+`APTJEEVES_ATTACHMENT_MAX_TEXT_CHARS` (200000), `APTJEEVES_ATTACHMENT_TIMEOUT_SECONDS` (60),
+`APTJEEVES_ATTACHMENT_FLAT_LISTING_THRESHOLD` (8). OCR tuning: `APTJEEVES_ATTACHMENT_OCR_MIN_CONFIDENCE` (0.6),
+`APTJEEVES_ATTACHMENT_OCR_MAX_PAGES` (10 per PDF), `APTJEEVES_ATTACHMENT_OCR_TIMEOUT_SECONDS` (180),
+`APTJEEVES_ATTACHMENT_OCR_MIN_IMAGE_SIDE` (200 px), `APTJEEVES_ATTACHMENT_OCR_MIN_TEXT_CHARS` (30).
+
+Design: `doc/attachment-ingestion-design.md`.
 
 ## Ingest A Telegram Export
 
@@ -560,6 +617,7 @@ Start here for the architecture and implementation plan:
 ```text
 doc/architecture.md
 doc/detailed-design.md
+doc/attachment-ingestion-design.md
 ```
 
 ## Web Interface (UI & FastAPI Backend)

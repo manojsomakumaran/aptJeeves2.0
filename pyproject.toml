@@ -17,8 +17,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+attachments = [
+  "pdfplumber",
+  "python-docx",
+  "openpyxl",
+]
+ocr = [
+  "rapidocr-onnxruntime",
+  "pillow",
+]
 dev = [
   "pytest>=8",
+  "pdfplumber",
+  "python-docx",
+  "openpyxl",
 ]
 
 [project.scripts]

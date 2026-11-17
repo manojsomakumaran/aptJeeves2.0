@@ -32,6 +32,11 @@ class RawMessageInsert:
     parser_version: str
     normalizer_version: str
     redactor_version: str
+    # Attachment-derived segments reuse this ledger; chat rows keep the defaults.
+    source_kind: str = "chat"
+    parent_message_id: str | None = None
+    attachment_id: str | None = None
+    segment_label: str | None = None
 
 
 @dataclass(frozen=True)

@@ -956,6 +956,36 @@ function IngestionManager() {
                     </div>
                  </div>
 
+                 {statusData.attachments && (
+                   <div>
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="text-slate-600 font-medium">Attachments (documents)</span>
+                        <span className="text-slate-800 font-bold">{statusData.attachments.pending} pending</span>
+                      </div>
+                      <div className="text-xs text-slate-500 flex flex-wrap gap-x-3 gap-y-0.5">
+                        <span>Extracted: <span className="font-semibold text-emerald-700">{statusData.attachments.text_extracted}</span></span>
+                        <span>No text: <span className="font-semibold text-slate-700">{statusData.attachments.no_text}</span></span>
+                        <span>Skipped (sensitive): <span className="font-semibold text-slate-700">{statusData.attachments.skipped_sensitive}</span></span>
+                        <span>Unsupported: <span className="font-semibold text-slate-700">{statusData.attachments.skipped_unsupported}</span></span>
+                        <span>Too large: <span className="font-semibold text-slate-700">{statusData.attachments.skipped_too_large}</span></span>
+                        <span>Failed: <span className="font-semibold text-red-600">{statusData.attachments.failed}</span></span>
+                      </div>
+                      {statusData.attachment_ocr && (
+                        <div className="text-xs text-slate-500 flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
+                          <span>OCR: <span className={`font-semibold ${statusData.attachment_ocr.backend === 'local' ? 'text-emerald-700' : 'text-slate-700'}`}>{statusData.attachment_ocr.backend === 'local' ? 'on' : 'off'}</span></span>
+                          <span>Read by OCR: <span className="font-semibold text-emerald-700">{statusData.attachment_ocr.text_extracted}</span></span>
+                          <span>OCR found no text: <span className="font-semibold text-slate-700">{statusData.attachment_ocr.no_text}</span></span>
+                          {statusData.attachment_ocr.awaiting_ocr > 0 && statusData.attachment_ocr.backend !== 'local' && (
+                            <span>Waiting for OCR: <span className="font-semibold text-amber-700">{statusData.attachment_ocr.awaiting_ocr}</span></span>
+                          )}
+                          {statusData.attachment_ocr.failed_unavailable > 0 && (
+                            <span className="text-red-600 font-semibold">OCR engine not installed ({statusData.attachment_ocr.failed_unavailable} failed)</span>
+                          )}
+                        </div>
+                      )}
+                   </div>
+                 )}
+
                  <div>
                     <div className="flex justify-between text-sm mb-1">
                       <span className="text-slate-600 font-medium">Indexing Queue (Pending Facts)</span>

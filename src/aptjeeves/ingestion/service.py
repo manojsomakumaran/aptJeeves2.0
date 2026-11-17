@@ -7,6 +7,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from aptjeeves.attachments.config import AttachmentConfig
+from aptjeeves.attachments.service import AttachmentService
 from aptjeeves.ingestion.fingerprint import conversation_id, message_fingerprint
 from aptjeeves.ingestion.hashing import sha256_file
 from aptjeeves.ingestion.normalizer import (
@@ -51,10 +53,16 @@ class IngestRequest:
 class ChatIngestionService:
     """Coordinates parsing, normalization, dedupe, storage, and events for imports."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        attachment_config: AttachmentConfig | None = None,
+    ) -> None:
         """Create an ingestion service using an already-migrated SQLite connection."""
 
         self.connection = connection
+        self.attachments = AttachmentService(connection, config=attachment_config)
         self.import_runs = ImportRunRepository(connection)
         self.raw_messages = RawMessageRepository(connection)
         self.facts = CanonicalFactRepository(connection)
@@ -400,6 +408,18 @@ class ChatIngestionService:
                                 import_batch_id=import_batch_id,
                                 payload={"error": str(e), "message_id": message_id, "filename": filename},
                             )
+
+                # Attachments (PDF/DOCX/XLSX/CSV/TXT/images) referenced by this
+                # message are hashed, spooled, and linked here; text extraction
+                # happens later in the attachments stage. Duplicate messages are
+                # included so a re-import with the files present can backfill.
+                self.attachments.register_from_message(
+                    text=parsed.text,
+                    message_id=message_id,
+                    upload_dir=request.upload_dir,
+                    trace_id=trace_id,
+                    import_batch_id=import_batch_id,
+                )
 
             status = _import_status(
                 parse_failures=len(parse_result.failures),
