@@ -4,6 +4,13 @@ import json
 import sqlite3
 
 
+# OpenAI embedding models reject inputs over 8192 tokens. Token-dense text
+# (phone numbers, Indic scripts, tables) can approach 1 token per character, so
+# the caps are character-based and conservative.
+MAX_SNIPPET_CHARS = 800
+MAX_EMBEDDING_CHARS = 6000
+
+
 class EmbeddingTextBuilder:
     """Build sanitized retrieval text for canonical facts."""
 
@@ -17,12 +24,14 @@ class EmbeddingTextBuilder:
 
         fact_type = fact["fact_type"]
         if fact_type == "service_contact":
-            return self._service_contact_text(fact)
-        if fact_type == "process_info":
-            return self._process_info_text(fact)
-        if fact_type == "facility_info":
-            return self._facility_info_text(fact)
-        return self._base_text(fact)
+            text = self._service_contact_text(fact)
+        elif fact_type == "process_info":
+            text = self._process_info_text(fact)
+        elif fact_type == "facility_info":
+            text = self._facility_info_text(fact)
+        else:
+            text = self._base_text(fact)
+        return text[:MAX_EMBEDDING_CHARS]
 
     def _base_text(self, fact: sqlite3.Row) -> str:
         """Return fields shared by all fact types."""
@@ -117,7 +126,7 @@ class EmbeddingTextBuilder:
             """,
             (fact_id,),
         ).fetchall()
-        snippets = [row["sanitized_snippet"] for row in rows]
+        snippets = [row["sanitized_snippet"][:MAX_SNIPPET_CHARS] for row in rows]
         if not snippets:
             return ""
         return "Evidence snippets: " + " | ".join(snippets)
