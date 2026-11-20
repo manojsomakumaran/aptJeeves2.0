@@ -6,6 +6,7 @@ from typing import Any
 
 from aptjeeves.answering.guardrails import GUARDRAIL_VERSION, GuardrailValidator
 from aptjeeves.answering.formatter import AnswerFormatter, AnswerResponse
+from aptjeeves.answering.reveal import reveal_contacts
 from aptjeeves.answering.llm_answerer import LLM_ANSWERER_VERSION
 from aptjeeves.indexing.embeddings import LocalTokenEmbeddingModel
 from aptjeeves.ingestion.hashing import sha256_text
@@ -130,7 +131,7 @@ class QueryService:
                 },
             )
 
-        return guardrail.answer
+        return reveal_contacts(guardrail.answer, context)
 
 
 def _answerer_version(answerer: Any) -> str:

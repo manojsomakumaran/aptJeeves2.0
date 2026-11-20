@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from aptjeeves.privacy.detectors import SensitiveSpan, detect_sensitive_spans
 
@@ -16,6 +16,10 @@ class RedactionResult:
     text: str
     counts: dict[str, int]
     placeholders: dict[str, str]
+    # placeholder -> original text. Local-only: it must never be sent to an LLM,
+    # logged, or put in events. It exists so service-contact numbers can be
+    # restored into the answer after the LLM has finished.
+    values: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 def redact_text(text: str) -> RedactionResult:
@@ -32,6 +36,7 @@ def redact_text(text: str) -> RedactionResult:
     counters: Counter[str] = Counter()
     parts: list[str] = []
     placeholders: dict[str, str] = {}
+    values: dict[str, str] = {}
     cursor = 0
 
     for span in spans:
@@ -40,6 +45,7 @@ def redact_text(text: str) -> RedactionResult:
         parts.append(text[cursor : span.start])
         parts.append(placeholder)
         placeholders[placeholder] = span.kind
+        values[placeholder] = span.text
         cursor = span.end
 
     parts.append(text[cursor:])
@@ -47,6 +53,7 @@ def redact_text(text: str) -> RedactionResult:
         text="".join(parts),
         counts=dict(counters),
         placeholders=placeholders,
+        values=values,
     )
 
 

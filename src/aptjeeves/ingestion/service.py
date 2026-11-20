@@ -11,9 +11,11 @@ from aptjeeves.attachments.config import AttachmentConfig
 from aptjeeves.attachments.service import AttachmentService
 from aptjeeves.ingestion.fingerprint import conversation_id, message_fingerprint
 from aptjeeves.ingestion.hashing import sha256_file
+from aptjeeves.privacy.vault import PiiVault
 from aptjeeves.ingestion.normalizer import (
     NORMALIZER_VERSION,
     REDACTOR_VERSION,
+    detect_date_order,
     normalize_message,
 )
 from aptjeeves.ingestion.hashing import sha256_text
@@ -45,7 +47,7 @@ class IngestRequest:
     file_path: Path
     chat_name: str | None = None
     default_timezone: str = "Asia/Kolkata"
-    date_order: str = "DMY"
+    date_order: str = "AUTO"
     upload_dir: Path | None = None
     max_parse_failure_rate: float = 0.05
 
@@ -67,6 +69,7 @@ class ChatIngestionService:
         self.raw_messages = RawMessageRepository(connection)
         self.facts = CanonicalFactRepository(connection)
         self.events = ObservabilityService(connection)
+        self.pii_vault = PiiVault(connection)
 
     def ingest(self, request: IngestRequest) -> ImportSummary:
         """Ingest a chat export and return a persisted import summary.
@@ -123,6 +126,12 @@ class ChatIngestionService:
                 },
             )
 
+        date_order = request.date_order.upper()
+        if date_order == "AUTO":
+            date_order = detect_date_order(
+                [m.date_text for m in parse_result.messages if not m.sent_at_utc]
+            )
+
         total_messages_seen = len(parse_result.messages)
         new_messages_inserted = 0
         duplicate_messages_skipped = 0
@@ -151,7 +160,7 @@ class ChatIngestionService:
                 normalized = normalize_message(
                     parsed,
                     default_timezone=request.default_timezone,
-                    date_order=request.date_order,
+                    date_order=date_order,
                 )
                 if normalized is None:
                     self.events.emit(
@@ -211,6 +220,10 @@ class ChatIngestionService:
                         redactor_version=REDACTOR_VERSION,
                     )
                 )
+                # Store the original phone/email values even for duplicates, so
+                # re-importing a chat backfills messages imported before the
+                # vault existed.
+                self.pii_vault.store(message_id, normalized.redaction_values)
                 if inserted:
                     # Only newly inserted messages continue to later extraction
                     # milestones. In Milestone 1 we stop after storing the row.
@@ -449,6 +462,11 @@ class ChatIngestionService:
                     "parse_failures": len(parse_result.failures),
                 },
             )
+
+        # Re-importing an older chat can supply numbers for facts extracted before
+        # the vault existed.
+        with self.connection:
+            self.pii_vault.backfill_service_contacts()
 
         summary = self.import_runs.get_summary(import_batch_id)
         if summary is None:

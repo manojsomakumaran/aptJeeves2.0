@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from aptjeeves.retrieval.reranker import RankedFact
@@ -25,6 +25,8 @@ class FactContext:
     caveats: list[str]
     details: dict[str, Any]
     final_score: float
+    # ref token -> real value. Local only: never serialized into an LLM prompt.
+    contact_reveals: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,7 @@ class ContextBuilder:
 
         selected = ranked_facts[: self.max_facts]
         fact_contexts: list[FactContext] = []
+        all_reveals: dict[str, str] = {}
 
         for ranked in selected:
             fact_row = self.connection.execute(
@@ -66,6 +69,8 @@ class ContextBuilder:
             details = self._load_subtype_details(ranked.fact_id, ranked.fact_type)
             snippets = self._load_snippets(ranked.fact_id)
             contact_methods = self._approved_contact_methods(details, fact_row["privacy_status"])
+            contact_methods, reveals = _hold_out_values(contact_methods, start=len(all_reveals))
+            all_reveals.update(reveals)
             caveats = self._build_caveats(fact_row, details)
 
             fact_contexts.append(
@@ -79,6 +84,7 @@ class ContextBuilder:
                     confidence=fact_row["confidence"],
                     privacy_status=fact_row["privacy_status"],
                     approved_contact_methods=contact_methods,
+                    contact_reveals=reveals,
                     sanitized_snippets=snippets,
                     caveats=caveats,
                     details=details,
@@ -145,3 +151,26 @@ class ContextBuilder:
         if detail_caveats and isinstance(detail_caveats, str):
             caveats.append(detail_caveats)
         return caveats
+
+
+def _hold_out_values(
+    methods: list[dict[str, Any]], *, start: int
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Swap real contact values for opaque CONTACTREF_n tokens.
+
+    The LLM only sees the token; `reveal_contacts` swaps the real value back into
+    the final answer text after generation and the privacy guardrail.
+    """
+
+    safe: list[dict[str, Any]] = []
+    reveals: dict[str, str] = {}
+    for method in methods:
+        entry = {k: v for k, v in method.items() if k != "value"}
+        value = method.get("value")
+        if value:
+            token = f"CONTACTREF_{start + len(reveals) + 1}"
+            reveals[token] = str(value)
+            entry["contact_ref"] = token
+            entry.pop("value_placeholder", None)
+        safe.append(entry)
+    return safe, reveals

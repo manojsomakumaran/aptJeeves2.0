@@ -10,6 +10,7 @@ from aptjeeves.extraction.schemas import ExtractedFact, Extractor, MessageForExt
 from aptjeeves.extraction.validator import validate_extraction_payload
 from aptjeeves.ingestion.hashing import sha256_text
 from aptjeeves.observability.events import ObservabilityService
+from aptjeeves.privacy.vault import PiiVault
 from aptjeeves.storage.models import (
     ExtractionSummary,
     FacilityInfoUpsert,
@@ -36,6 +37,7 @@ class ExtractionService:
         self.raw_messages = RawMessageRepository(connection)
         self.facts = CanonicalFactRepository(connection)
         self.events = ObservabilityService(connection)
+        self.pii_vault = PiiVault(connection)
 
     def extract_rows(self, rows: list[sqlite3.Row]) -> ExtractionSummary:
         """Extract facts from raw message rows and return an ExtractionSummary.
@@ -89,6 +91,9 @@ class ExtractionService:
                 evidence = _evidence_for_fact(extracted, rows_by_id)
                 referenced_message_ids.update(item.message_id for item in evidence)
                 fact_id = self._upsert_fact(extracted, evidence, rows_by_id)
+                if extracted.fact_type == "service_contact":
+                    # Restore real numbers locally; the LLM only ever saw placeholders.
+                    self.pii_vault.resolve_service_contact(fact_id)
                 logger.debug(f"Upserted canonical fact {fact_id} of type {extracted.fact_type}")
                 fact_ids.append(fact_id)
                 self.events.emit(

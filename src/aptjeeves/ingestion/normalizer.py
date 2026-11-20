@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from collections.abc import Iterable
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -37,6 +38,8 @@ class NormalizedMessage:
     normalized_text_hash: str
     sanitized_text: str
     redaction_counts: dict[str, int]
+    # placeholder -> original text for PHONE/EMAIL spans (local vault only).
+    redaction_values: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 def normalize_message(
@@ -78,6 +81,11 @@ def normalize_message(
         normalized_text_hash=sha256_text(normalized_text),
         sanitized_text=redaction.text,
         redaction_counts=redaction.counts,
+        redaction_values={
+            placeholder: value
+            for placeholder, value in redaction.values.items()
+            if redaction.placeholders[placeholder] in {"PHONE", "EMAIL"}
+        },
     )
 
 
@@ -112,6 +120,27 @@ def normalize_timestamp(
     hour, minute, second = _parse_time_parts(time_text)
     local_dt = datetime(year, month, day, hour, minute, second, tzinfo=ZoneInfo(default_timezone))
     return local_dt.astimezone(ZoneInfo("UTC")).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def detect_date_order(date_texts: Iterable[str], *, fallback: str = "DMY") -> str:
+    """Infer DMY vs MDY from slash-separated dates in a whole export.
+
+    A first field above 12 proves DMY; a second field above 12 proves MDY.
+    If every date is ambiguous (or the file is inconsistent), use `fallback`.
+    """
+
+    first_gt_12 = second_gt_12 = False
+    for text in date_texts:
+        parts = text.split("/")
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        first_gt_12 |= int(parts[0]) > 12
+        second_gt_12 |= int(parts[1]) > 12
+    if second_gt_12 and not first_gt_12:
+        return "MDY"
+    if first_gt_12 and not second_gt_12:
+        return "DMY"
+    return fallback
 
 
 def _parse_date_parts(date_text: str, *, date_order: str) -> tuple[int, int, int]:

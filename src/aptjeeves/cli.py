@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     ingest.add_argument("--timezone", default=None)
-    ingest.add_argument("--date-order", default="DMY", choices=["DMY", "MDY"])
+    ingest.add_argument("--date-order", default="AUTO", choices=["AUTO", "DMY", "MDY"])
     ingest.add_argument(
         "--upload-dir",
         default=None,

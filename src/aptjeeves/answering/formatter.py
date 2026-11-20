@@ -119,7 +119,7 @@ class AnswerFormatter:
         if fact.approved_contact_methods:
             for method in fact.approved_contact_methods:
                 mtype = method.get("type", "contact")
-                value = method.get("value_placeholder") or method.get("value", "")
+                value = method.get("contact_ref") or method.get("value_placeholder", "")
                 lines.append(f"{mtype.title()}: {value}")
         elif fact.privacy_status in ("needs_review", "restricted", "blocked"):
             lines.append("Contact details are not shareable at this time.")
