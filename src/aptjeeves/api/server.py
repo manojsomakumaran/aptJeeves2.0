@@ -218,12 +218,30 @@ def get_processing_status(apartment: str, settings: Settings = Depends(get_setti
                 "total_new": raw_repo.count_by_processing_status("new"),
                 "total_failed": raw_repo.count_by_processing_status("failed"),
                 "total_extracted": raw_repo.count_by_processing_status("extracted"),
+                "total_skipped_noise": raw_repo.count_by_processing_status("skipped_noise_filter"),
             },
             "attachments": attachment_counts,
             "attachment_ocr": attachment_ocr,
             "facts": {
                 "total": fact_repo.connection.execute("SELECT COUNT(*) as count FROM canonical_facts").fetchone()["count"],
-                "pending_indexing": fact_repo.count_facts_for_indexing(embedding_model_version=embedding_model_version)
+                "pending_indexing": fact_repo.count_facts_for_indexing(embedding_model_version=embedding_model_version),
+                "by_type": {
+                    r["fact_type"]: r["count"]
+                    for r in conn.execute(
+                        "SELECT fact_type, COUNT(*) AS count FROM canonical_facts GROUP BY fact_type"
+                    )
+                },
+                "recent": [
+                    {
+                        "fact_id": r["fact_id"],
+                        "fact_type": r["fact_type"],
+                        "title": r["title"],
+                        "updated_at": r["updated_at"],
+                    }
+                    for r in conn.execute(
+                        "SELECT fact_id, fact_type, title, updated_at FROM canonical_facts ORDER BY updated_at DESC LIMIT 8"
+                    )
+                ],
             },
             "vectors": {
                 "active": vector_repo.count_active(embedding_model_version=embedding_model_version)

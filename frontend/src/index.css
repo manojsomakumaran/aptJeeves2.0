@@ -17,3 +17,47 @@ html, body, #root {
   content: '';
   animation: ellipsis 1.5s infinite steps(1);
 }
+
+/* ---- Pipeline view animations ---- */
+@keyframes pv-packet {
+  0% { left: -12px; opacity: 0; }
+  15% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { left: 100%; opacity: 0; }
+}
+.pv-packet { animation: pv-packet 1.8s linear infinite; }
+
+@keyframes pv-glow {
+  0%, 100% { filter: drop-shadow(0 0 0 rgba(59, 130, 246, 0)); }
+  50% { filter: drop-shadow(0 0 10px rgba(59, 130, 246, 0.55)); }
+}
+.pv-glow { animation: pv-glow 1.8s ease-in-out infinite; }
+
+@keyframes pv-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  70% { transform: scale(1.2); }
+  100% { transform: scale(1); opacity: 1; }
+}
+.pv-pop { animation: pv-pop 0.5s ease-out; }
+
+@keyframes pv-slide-in {
+  0% { transform: translateX(-24px); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+.pv-slide-in { animation: pv-slide-in 0.5s ease-out; }
+
+@keyframes pv-bubble {
+  0%, 100% { opacity: 0.55; transform: translateX(0); }
+  50% { opacity: 1; transform: translateX(4px); }
+}
+.pv-bubble { animation: pv-bubble 2.4s ease-in-out infinite; }
+
+@keyframes pv-confetti {
+  0% { transform: translateY(0) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(420px) rotate(540deg); opacity: 0; }
+}
+.pv-confetti { animation: pv-confetti 2.6s ease-in forwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pv-packet, .pv-glow, .pv-pop, .pv-slide-in, .pv-bubble, .pv-confetti { animation: none; }
+}
